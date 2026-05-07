@@ -66,10 +66,9 @@ func establishConnection(conn io.ReadWriteCloser, keyCode []byte, valueCode []by
 	}
 
 	if !slices.Equal(keyCode, buf[:n]) {
-		logger.Error("failed to establish connection")
+		logger.Error("failed to establish connectsion")
 		return fmt.Errorf("invalid key code")
 	}
-
 	_, err = conn.Write([]byte{globals.OK_STATUS_CODE})
 	if err != nil {
 		logger.Error("failed to establish connection")
@@ -78,11 +77,12 @@ func establishConnection(conn io.ReadWriteCloser, keyCode []byte, valueCode []by
 
 	n, err = conn.Read(buf)
 	if err != nil {
+		logger.Error("failed to establish connection")
 		return err
 	}
-
+	
 	if !slices.Equal(valueCode, buf[:n]) {
-		logger.Error("failed to establish connection")
+		logger.Error("failed to establish connection, invalid value code")
 		return fmt.Errorf("invalid value code")
 	}
 	_, err = conn.Write([]byte{globals.OK_STATUS_CODE})
@@ -124,15 +124,16 @@ func handleCallerRequest[K any, V any](conn io.ReadWriteCloser, keySerializer *m
 				errMsg := res.err.Error()
 				buf[0] = globals.ERROR_SERVICE_ERROR_CODE
 				stringSerializer.Encode(&errMsg, buf[1:])
-				_, err = conn.Write(buf[:stringSerializer.GetRequiredSize(&errMsg)])
+				_, err = conn.Write(buf[:stringSerializer.GetRequiredSize(&errMsg)+1])
 				if err != nil {
 					logger.Error("failed to write from connection", "error", err)
 					return
 				}
 			}
 
-			valueSerializer.Encode(&res.data, buf)
-			_, err = conn.Write(buf[:valueSerializer.GetRequiredSize(&res.data)])
+			buf[0] = globals.OK_STATUS_CODE
+			valueSerializer.Encode(&res.data, buf[1:])
+			_, err = conn.Write(buf[:valueSerializer.GetRequiredSize(&res.data)+1])
 			if err != nil {
 				logger.Error("failed to write from connection", "error", err)
 				return
