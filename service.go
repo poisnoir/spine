@@ -113,7 +113,7 @@ func (s *Service[K, V]) runHandler() {
 				// Todo: Change To return error instead of default
 			}
 			request.output <- serviceOutput[V]{data: response, err: err}
-			s.namespace.logger.Info("handled request", "request", request, "response", response)
+			s.namespace.logger.Info("handled request", "request", request.input, "response", response)
 		case <-s.context.Done():
 			return
 		}
