@@ -126,7 +126,7 @@ func (sc *ServiceCaller[K, V]) send(key K) (V, error) {
 		return v, fmt.Errorf("call error: %s", errMsg)
 	}
 
-	_ = sc.valueSerializer.Decode(buf, &v)
+	_ = sc.valueSerializer.Decode(buf[1:], &v)
 	return v, nil
 }
 
