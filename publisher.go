@@ -48,7 +48,7 @@ func NewPublisher[K any](ns *Namespace, name string) (*Publisher[K], error) {
 
 	server, err := zeroconf.Register(
 		name,
-		ns.Name()+globals.ZERO_CONF_NODE_TYPE,
+		"_"+ns.Name()+globals.ZERO_CONF_NODE_TYPE,
 		globals.ZERO_CONF_DOMAIN,
 		listener.Addr().(*net.UDPAddr).Port,
 		[]string{
