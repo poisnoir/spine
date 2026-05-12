@@ -91,8 +91,8 @@ func (s *Subscriber[K]) run() {
 				_, err = s.conn.Write([]byte{globals.PONG_CODE})
 				if err != nil {
 					s.isConnected = false
-					continue
 				}
+				continue
 			}
 
 			s.serializer.Decode(buf[1:], &data)
