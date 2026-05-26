@@ -13,16 +13,12 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ns, _ := spine.JointNamespace("example", "meow", logger)
 
-	handle1 := func(temp uint32) {
-		fmt.Println(temp)
-	}
+	sub1, _ := spine.NewSubscriber[uint32](ns, "temperature")
+	_, _ = spine.NewSubscriber[uint32](ns, "temperature")
 
-	handle2 := func(temp uint32) {
-		fmt.Printf("sub 2 : %d\n", temp)
+	for {
+		fmt.Println(sub1.Get())
 	}
-
-	_, _ = spine.NewSubscriber(ns, "temperature", handle1)
-	_, _ = spine.NewSubscriber(ns, "temperature", handle2)
 
 	select {}
 }

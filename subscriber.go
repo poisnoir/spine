@@ -22,13 +22,12 @@ type Subscriber[K any] struct {
 
 	mutex    sync.RWMutex
 	lastData K
-	handler  func(K)
 	pushSig  chan struct{}
 
 	serializer *mad.Mad[K]
 }
 
-func NewSubscriber[K any](namespace *Namespace, topic string, handler func(K)) (*Subscriber[K], error) {
+func NewSubscriber[K any](namespace *Namespace, topic string) (*Subscriber[K], error) {
 
 	decoder, err := mad.NewMad[K]()
 	if err != nil {
@@ -45,30 +44,27 @@ func NewSubscriber[K any](namespace *Namespace, topic string, handler func(K)) (
 		cancel:      cancel,
 		isConnected: false,
 
-		handler: handler,
 		pushSig: make(chan struct{}, 1),
 
 		serializer: decoder,
 	}
 
 	go sub.run()
-	go sub.runHandler()
 
 	return sub, nil
 }
 
-func (s *Subscriber[K]) runHandler() {
-	for {
-
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-s.pushSig:
-			s.mutex.RLock()
-			snap := s.lastData
-			s.mutex.RUnlock()
-			s.handler(snap)
-		}
+func (s *Subscriber[K]) Get() (K, error) {
+	var zero K
+	select {
+	case <-s.ctx.Done():
+		// s.ctx.Err() returns the actual error (e.g., context.Canceled)
+		return zero, s.ctx.Err()
+	case <-s.pushSig:
+		s.mutex.RLock()
+		snap := s.lastData
+		s.mutex.RUnlock()
+		return snap, nil
 	}
 }
 
