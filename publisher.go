@@ -35,7 +35,7 @@ func NewPublisher[K any](ns *Namespace, name string) (*Publisher[K], error) {
 	if err != nil {
 		return nil, err
 	}
-	listener, err := createListener("/tmp/spine/publiser/" + name)
+	listener, err := createListener("/tmp/spine/publisher/" + name)
 	if err != nil {
 		return nil, err
 	}

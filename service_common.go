@@ -40,11 +40,6 @@ func generateService[K any, V any](namespace *Namespace, name string) (*mad.Mad[
 		return nil, nil, nil, err
 	}
 
-	if err != nil {
-		logger.Error("unable to register service to zeroconf", "error", err)
-		return nil, nil, nil, err
-	}
-
 	return keyEnc, valueEnc, listener, nil
 
 }

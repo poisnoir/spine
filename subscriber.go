@@ -112,7 +112,7 @@ func (s *Subscriber[K]) connect() error {
 	)
 
 	// establishing connection
-	conn, err := net.Dial("unix", "/tmp/spine/service/"+s.subscribedTo)
+	conn, err := net.Dial("unix", "/tmp/spine/publisher/"+s.subscribedTo)
 	if err != nil {
 		logger.Error("failed to dial publisher", "error", err)
 		return err

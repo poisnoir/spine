@@ -1,136 +1,100 @@
-# spine-go
-### High-Performance, Local-First Service Library for Go
+# Spine-Go
+### High-Performance, Hybrid Communication Middleware for Go
 
-**Spine-Go** is a lightweight, "zero-config" middleware designed for high-performance communication on local networks (LAN) and edge clusters. It provides ROS-like communication patterns—**Services (RPC)** and **Pub/Sub**—built natively in Go with zero external brokers, minimal overhead, and absolute developer freedom.
+**Spine-Go** is a lightweight, local-first communication library designed for robotics, edge computing, and distributed systems. It provides a "zero-config" interface for **Services (RPC)** and **Pub/Sub** patterns, optimized for extreme performance on local machines while seamlessly scaling to LAN/WAN via the `spined` daemon.
 
-> Spine-Go is currently in an **Alpha/Experimental** state. The core "backbone" is functional, but the protocol is still evolving. Expect breaking changes, and do not use this for mission-critical production systems yet.
+## 🚀 Key Philosophy: Hybrid Architecture
+Spine-Go employs a dual-path architecture to ensure you never sacrifice performance for connectivity:
 
----
-
-## The Philosophy: "Just write a Function"
-Unlike ROS or gRPC, Spine-Go doesn't force you into complex IDL files (.msg, .proto), custom build tools, or heavy middleware dependencies. 
-
-If you can write a Go function, you can build a Spine service.
-* **No IDL:** No Protobuf or ROS `.srv` files to maintain.
-* **No Boilerplate:** Use any Go library (OpenCV, GORM, Periph.io) and "service-ify" it instantly.
-* **Type-Safe:** Fully leverages **Go Generics** for compile-time safety.
+1.  **Local-First IPC**: When communicating on the same machine, Spine-Go uses **Unix Domain Sockets**, bypassing the network stack for ultra-low latency and maximum throughput.
+2.  **Daemon-Assisted Networking**: When a connection outside the machine is needed, Spine-Go handshakes with the `spined` daemon.
 
 ---
 
-## Key Features
-* **KCP over UDP:** Superior performance on "lossy" or unstable networks (like busy Wi-Fi) compared to TCP.
-* **Zeroconf (mDNS) Discovery:** Plug-and-play service registration. No IP management required.
-* **Encrypted by Default:** Namespace-based isolation with built-in AES-GCM encryption.
+## ✨ Features
+*   **Zero IDL Boilerplate**: No `.proto` or `.msg` files. Define your services and topics using native Go types and generics.
+*   **Compile-Time Type Safety**: Leverages Go 1.18+ generics to catch data mismatches before your code even runs.
+*   **Extreme Performance**: Optimized buffer pooling and the `mad-go` serialization engine ensure minimal GC pressure and high throughput.
+*   **Resilient Connectivity**: Built-in exponential backoff and automatic reconnection logic.
+*   **Hybrid Discovery**: Works in "Local-Only" mode without any external dependencies, or "Global" mode by connecting to the `spined` sidecar.
 
 ---
 
-## Spine-Go vs. ROS
-| Feature | ROS 2 (DDS) | Spine-Go |
-| :--- | :--- | :--- |
-| **Complexity** | High (XML, IDLs, Colcon) | **Zero** (Standard Go tools) |
-| **Discovery** | DDS Discovery (Heavier) | **Zeroconf** (Lightweight) |
-| **Protocol** | TCP/UDP/DDS | **KCP/UDP** (Low Jitter) |
+## 📊 Performance Benchmarks
+*Tested on AMD Ryzen Threadripper PRO 5945WX (Linux/amd64)*
+
+| Pattern | Throughput | Latency (ns/op) | Memory (B/op) | Allocs/op |
+| :--- | :--- | :--- | :--- | :--- |
+| **Pub/Sub** | ~53,000 msg/sec | 18,896 | 221 | 8 |
+| **Service Call (RPC)** | ~33,000 req/sec | 30,578 | 417 | 13 |
+| **Threaded Service** | ~27,000 req/sec | 32,909 | 271 | 9 |
+
+> *Note: Benchmarks represent local IPC overhead including serialization. Actual network performance depends on the `spined` configuration.*
 
 ---
 
-## Getting Started
+## 🛠 Getting Started
 
-### 1. Join a Namespace
-All communication happens within a secured namespace.
-
+### 1. Initialize a Namespace
+All communication is isolated within a namespace.
 ```go
-logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-// Join a namespace with a secret key and encryption enabled
-ns, err := spine.JointNamespace("robot_arm", "secret_key", logger, true)
+ctx := context.Background()
+logger := slog.Default()
+
+// Joins a namespace. Automatically detects spined daemon.
+ns, err := spine.JointNamespace("robot_core", ctx, logger)
 ```
 
-### 2. Create a Service
+### 2. Services (RPC)
 Turn any Go function into a network-discoverable service.
+
+**Server:**
 ```go
-// Define a handler: func(InputType) (OutputType, error)
-handler := func(input string) (uint32, error) {
-    return uint32(len(input)), nil
+handler := func(input string) (int, error) {
+    return len(input), nil
 }
 
-// Register the service
-_, err = spine.NewService(ns, "string_length", handler)
+// Register a standard service (sequential execution)
+service, _ := spine.NewService(ns, "compute_len", handler)
 ```
 
-### 3. Call a Service
-Call services from any machine on the network using the same generic types.
+**Client:**
 ```go
-caller, err := NewServiceCaller[string, uint32](ns, "string_length")
+caller, _ := spine.NewServiceCaller[string, int](ns, "compute_len")
 
-ctx, _ := context.WithTimeout(context.Background(), time.Second)
-// Blocks until result is received or context is canceled
-result, err := caller.Call("hello world", ctx)
+// Type-safe call
+result, err := caller.Call("hello spine", context.Background())
 ```
 
----
-
-## Pub/Sub
-Publishers and Subscribers allow for asynchronous data flow. Connections are established automatically once a publisher is discovered on the network.
-
+### 3. Pub/Sub (Asynchronous)
+**Publisher:**
 ```go
-// Create a Publisher
-pub, _ := spine.NewPublisher[SensorData](ns, "lidar_scan")
-pub.Publish(currentData)
+pub, _ := spine.NewPublisher[SensorData](ns, "lidar")
+pub.Publish(data)
+```
 
-// Create a Subscriber
-sub, _ := spine.NewSubscriber(ns, "lidar_scan", func(data SensorData) {
-    fmt.Printf("Received data: %v\n", data)
-})
+**Subscriber:**
+```go
+sub, _ := spine.NewSubscriber[SensorData](ns, "lidar")
+
+// Polling for data
+data, err := sub.Get()
 ```
 
 ---
 
-## Examples
-You can find practical implementations and usage patterns in the `example/` directory:
-- `example/publisher/`: Asynchronous data broadcasting.
-- `example/subscriber/`: Subscribing to data streams.
-- `example/service/`: Setting up a network-discoverable service.
-- `example/service_caller/`: Calling services across the network.
+## 🔧 Service Types
+*   **Standard Service**: Processes requests sequentially. Best for handlers that modify shared state.
+*   **Threaded Service**: Processes requests in parallel. Best for stateless, CPU-intensive, or I/O-bound handlers.
 
-To run an example:
+---
+
+## 🏗 Installation
 ```bash
-# In one terminal
-go run example/service/service.go
-
-# In another terminal
-go run example/service_caller/caller.go
+go get github.com/poisnoir/spine-go
 ```
 
----
-
-## Benchmarks
-We take performance seriously. To run the benchmarks and see how Spine-Go performs on your machine:
-
-```bash
-# Run all benchmarks
-go test -bench=. -benchmem
-
-# Run specific service benchmarks
-go test -bench=BenchmarkServiceCall
-go test -bench=BenchmarkThreadedServiceCall
-```
-
-The benchmarks cover standard services, threaded services, parallel execution, and encrypted communication.
+*For cross-machine networking, ensure the `spined` daemon is running on your host.*
 
 ---
-
-## Known Weaknesses
-As we are "Still in Spine," there are several areas under active development:
-1. **Error Propagation:** Currently, handler errors are logged on the server but not yet fully propagated as structured errors to the client.
-2. **Lifecycle Management:** Graceful shutdowns and connection timeout handling are still being refined.
-3. **Documentation:** We are still working on comprehensive guides and examples.
-
----
-
-## Dependencies
-- [mad-go](https://github.com/poisnoir/mad-go): Serialization
-- [backoff](https://github.com/cenkalti/backoff): backoff
-
-## Contribution
-Feel free to contribute or suggest features. Contact: @rima1881
-
-**Built with ❤️ for the Go Edge & Robotics community.**
+**Built for the Go Edge & Robotics community.**
