@@ -49,8 +49,10 @@ func NewSubscriber[K any](namespace *Namespace, topic string) (*Subscriber[K], e
 		serializer: decoder,
 	}
 
-	go sub.run()
+	bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), sub.ctx)
+	_ = backoff.Retry(sub.connect, bo)
 
+	go sub.run()
 	return sub, nil
 }
 

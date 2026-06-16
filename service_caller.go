@@ -53,8 +53,10 @@ func NewServiceCaller[K any, V any](namespace *Namespace, serviceName string) (*
 		requests:    make(chan serviceRequest[K, V], 100),
 	}
 
-	go sc.run()
+	bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), sc.ctx)
+	_ = backoff.Retry(sc.connect, bo)
 
+	go sc.run()
 	return sc, nil
 }
 
