@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-
-	"github.com/poisnoir/spine-go/internal/globals"
-	"github.com/xtaci/kcp-go/v5"
+	"net"
+	"os"
+	"path/filepath"
 )
 
 // The buffer is coming from pool and it is big enoght
@@ -22,7 +22,7 @@ func write(sess io.ReadWriteCloser, buf []byte, requestSize int, hasResponse boo
 	return n, err
 }
 
-func runListener(listener *kcp.Listener, logger *slog.Logger, handler func(io.ReadWriteCloser)) {
+func runListener(listener net.Listener, logger *slog.Logger, handler func(io.ReadWriteCloser)) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -33,16 +33,14 @@ func runListener(listener *kcp.Listener, logger *slog.Logger, handler func(io.Re
 	}
 }
 
-func ping(conn io.ReadWriteCloser) error {
-	buf := []byte{globals.PING_CODE}
-	_, err := write(conn, buf, 1, true)
-	if err != nil {
-		return err
+func createListener(path string) (net.Listener, error) {
+	dir := filepath.Dir(path)
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directories: %w", err)
 	}
 
-	if buf[0] != globals.PONG_CODE {
-		return fmt.Errorf(globals.ERROR_PING)
-	}
-
-	return nil
+	_ = os.Remove(path)
+	listener, err := net.Listen("unix", path)
+	return listener, err
 }

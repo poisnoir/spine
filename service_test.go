@@ -11,11 +11,11 @@ import (
 
 func TestService(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	ns, err := JointNamespace("test_service", "secret", logger)
+	ctx := context.Background()
+	ns, err := JointNamespace("test_service", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ns.Disconnect()
 
 	handler := func(input string) (string, error) {
 		if input == "error" {
@@ -55,11 +55,11 @@ func TestService(t *testing.T) {
 
 func TestThreadedService(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	ns, err := JointNamespace("test_threaded_service", "secret", logger)
+	ctx := context.Background()
+	ns, err := JointNamespace("test_threaded_service", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ns.Disconnect()
 
 	handler := func(input uint32) (uint32, error) {
 		return input * 10, nil
@@ -92,11 +92,11 @@ func TestThreadedService(t *testing.T) {
 
 func TestServiceCaller_ContextCancel(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	ns, err := JointNamespace("test_cancel", "secret", logger)
+	ctx := context.Background()
+	ns, err := JointNamespace("test_cancel", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ns.Disconnect()
 
 	handler := func(input string) (string, error) {
 		time.Sleep(2 * time.Second)
@@ -125,11 +125,11 @@ func TestServiceCaller_ContextCancel(t *testing.T) {
 
 func TestThreadedService_Parallel(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	ns, err := JointNamespace("test_parallel", "secret", logger)
+	ctx := context.Background()
+	ns, err := JointNamespace("test_parallel", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ns.Disconnect()
 
 	handler := func(input uint32) (uint32, error) {
 		time.Sleep(10 * time.Millisecond)
@@ -147,7 +147,6 @@ func TestThreadedService_Parallel(t *testing.T) {
 	}
 	defer caller.Close()
 
-	ctx := context.Background()
 	const count = 20
 	errChan := make(chan error, count)
 

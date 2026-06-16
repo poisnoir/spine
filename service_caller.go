@@ -3,12 +3,11 @@ package spine
 import (
 	"context"
 	"fmt"
-	"time"
+	"net"
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/poisnoir/mad-go"
 	"github.com/poisnoir/spine-go/internal/globals"
-	"github.com/xtaci/kcp-go/v5"
 )
 
 type ServiceCaller[K any, V any] struct {
@@ -17,12 +16,11 @@ type ServiceCaller[K any, V any] struct {
 
 	keySerializer   *mad.Mad[K]
 	valueSerializer *mad.Mad[V]
-	errorSerializer *mad.Mad[string]
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	conn        *kcp.UDPSession
+	conn        net.Conn
 	requests    chan serviceRequest[K, V]
 	isConnected bool
 }
@@ -39,8 +37,6 @@ func NewServiceCaller[K any, V any](namespace *Namespace, serviceName string) (*
 		return nil, err
 	}
 
-	errSer, _ := mad.NewMad[string]()
-
 	ctx, cancel := context.WithCancel(namespace.ctx)
 
 	sc := &ServiceCaller[K, V]{
@@ -49,7 +45,6 @@ func NewServiceCaller[K any, V any](namespace *Namespace, serviceName string) (*
 
 		keySerializer:   keySer,
 		valueSerializer: valueSer,
-		errorSerializer: errSer,
 
 		ctx:    ctx,
 		cancel: cancel,
@@ -65,11 +60,6 @@ func NewServiceCaller[K any, V any](namespace *Namespace, serviceName string) (*
 
 func (sc *ServiceCaller[K, V]) run() {
 
-	// timer heartbeat
-	// make sure connection is open and alive
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-sc.ctx.Done():
@@ -78,15 +68,10 @@ func (sc *ServiceCaller[K, V]) run() {
 		default:
 			if sc.isConnected {
 				select {
-				case <-ticker.C:
-					if err := ping(sc.conn); err != nil {
-						sc.isConnected = false
-					}
 				case requestData := <-sc.requests:
-					// Postpone heartbeat
-					ticker.Reset(10 * time.Second)
 					output, err := sc.send(requestData.input)
 					if err != nil {
+						// Todo: Log
 						sc.isConnected = false
 					}
 					requestData.output <- serviceOutput[V]{data: output, err: err}
@@ -104,7 +89,7 @@ func (sc *ServiceCaller[K, V]) run() {
 func (sc *ServiceCaller[K, V]) send(key K) (V, error) {
 	var v V
 
-	requestSize := sc.keySerializer.GetRequiredSize(&key) + 1
+	requestSize := sc.keySerializer.GetRequiredSize(&key)
 	if requestSize > globals.MAX_PACKET_SIZE {
 		return v, fmt.Errorf(globals.ERROR_PAYLOAD_SIZE)
 	}
@@ -112,8 +97,8 @@ func (sc *ServiceCaller[K, V]) send(key K) (V, error) {
 	bufPtr := sc.namespace.bufferPool.Get().(*[]byte)
 	defer sc.namespace.bufferPool.Put(bufPtr)
 	buf := *bufPtr
-	buf[0] = globals.SERVICE_REQUEST
-	sc.keySerializer.Encode(&key, buf[1:])
+
+	sc.keySerializer.Encode(&key, buf)
 
 	_, err := write(sc.conn, buf, requestSize, true)
 	if err != nil {
@@ -122,7 +107,7 @@ func (sc *ServiceCaller[K, V]) send(key K) (V, error) {
 
 	if buf[0] != globals.OK_STATUS_CODE {
 		var errMsg string
-		_ = sc.errorSerializer.Decode(buf[1:], &errMsg)
+		_ = sc.namespace.stringSerializer.Decode(buf[1:], &errMsg)
 		return v, fmt.Errorf("call error: %s", errMsg)
 	}
 
@@ -162,15 +147,15 @@ func (sc *ServiceCaller[K, V]) connect() error {
 		"connect",
 	)
 
-	// finding the service
-	address, err := sc.namespace.GetService(sc.serviceName, sc.ctx)
-	if err != nil {
-		logger.Error("unable to find the service", "error", err)
-		return err // the only way to fail here is to run out of context
+	if sc.namespace.spinedConn != nil {
+		err := registerServiceCaller(sc.serviceName, sc.keySerializer.Code(), sc.valueSerializer.Code())
+		if err != nil {
+			return err
+		}
 	}
 
 	// establishing connection
-	sess, err := kcp.DialWithOptions(address, sc.namespace.encryption, 10, 3)
+	conn, err := net.Dial("unix", "/tmp/spine/service/"+sc.serviceName)
 	if err != nil {
 		logger.Error("failed to dial service", "error", err)
 		return err
@@ -185,7 +170,7 @@ func (sc *ServiceCaller[K, V]) connect() error {
 	keyCode := sc.keySerializer.Code()
 	n := copy(buf, keyCode)
 
-	n, err = write(sess, buf, n, true)
+	n, err = write(conn, buf, n, true)
 	if err != nil {
 		logger.Error("failed to validate service input type", "error", err)
 		return err
@@ -202,7 +187,7 @@ func (sc *ServiceCaller[K, V]) connect() error {
 	valueCode := sc.valueSerializer.Code()
 	n = copy(buf, valueCode)
 
-	n, err = write(sess, buf, n, true)
+	n, err = write(conn, buf, n, true)
 	if err != nil {
 		logger.Error("failed to validate service output type", "error", err)
 	} else if n != 1 {
@@ -214,7 +199,7 @@ func (sc *ServiceCaller[K, V]) connect() error {
 		logger.Error("failed to validate service output type", "error", err)
 		return err
 	}
-	sc.conn = sess
+	sc.conn = conn
 	sc.isConnected = true
 
 	return nil

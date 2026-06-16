@@ -127,9 +127,7 @@ As we are "Still in Spine," there are several areas under active development:
 ---
 
 ## Dependencies
-- [zeroconf](https://github.com/grandcat/zeroconf): Service discovery
 - [mad-go](https://github.com/poisnoir/mad-go): Serialization
-- [kcp-go](https://github.com/xtaci/kcp-go): Network Protocol
 - [backoff](https://github.com/cenkalti/backoff): backoff
 
 ## Contribution

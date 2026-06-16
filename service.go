@@ -4,22 +4,20 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 
-	"github.com/grandcat/zeroconf"
 	"github.com/poisnoir/mad-go"
-	"github.com/xtaci/kcp-go/v5"
 )
 
 type Service[K any, V any] struct {
 	namespace *Namespace
 	name      string
-	server    *zeroconf.Server
 
 	keySerializer   *mad.Mad[K]
 	valueSerializer *mad.Mad[V]
 
 	context  context.Context
-	listener *kcp.Listener
+	listener net.Listener
 	cancel   context.CancelFunc
 
 	handler  func(K) (V, error)
@@ -31,7 +29,7 @@ func NewService[K any, V any](namespace *Namespace, name string, handler func(K)
 	// fix me pls
 	logger := namespace.logger
 
-	keySer, valueSer, listener, server, err := generateService[K, V](namespace, name)
+	keySer, valueSer, listener, err := generateService[K, V](namespace, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create service: %v", err)
 	}
@@ -41,7 +39,6 @@ func NewService[K any, V any](namespace *Namespace, name string, handler func(K)
 	s := &Service[K, V]{
 		namespace: namespace,
 		name:      name,
-		server:    server,
 
 		keySerializer:   keySer,
 		valueSerializer: valueSer,

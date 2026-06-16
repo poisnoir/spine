@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 
 	"github.com/grandcat/zeroconf"
 	"github.com/poisnoir/mad-go"
-	"github.com/xtaci/kcp-go/v5"
 )
 
 type ThreadedService[K any, V any] struct {
@@ -17,7 +17,7 @@ type ThreadedService[K any, V any] struct {
 
 	context  context.Context
 	cancel   context.CancelFunc
-	listener *kcp.Listener
+	listener net.Listener
 
 	keySerializer   *mad.Mad[K]
 	valueSerializer *mad.Mad[V]
@@ -28,7 +28,7 @@ type ThreadedService[K any, V any] struct {
 
 func NewThreadedService[K any, V any](namespace *Namespace, name string, handler func(K) (V, error)) (*ThreadedService[K, V], error) {
 
-	keyEnc, valueEnc, listener, server, err := generateService[K, V](namespace, name)
+	keyEnc, valueEnc, listener, err := generateService[K, V](namespace, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create service: %v", err)
 	}
@@ -38,7 +38,6 @@ func NewThreadedService[K any, V any](namespace *Namespace, name string, handler
 	ts := &ThreadedService[K, V]{
 		namespace: namespace,
 		name:      name,
-		server:    server,
 
 		context: ctx,
 		cancel:  cancel,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,7 +11,9 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	ns, _ := spine.JointNamespace("example", "meow", logger)
+	ctx := context.Background()
+
+	ns, _ := spine.JointNamespace("example", ctx, logger)
 
 	lenFunc := func(input string) (uint32, error) {
 		return uint32(len(input)), nil

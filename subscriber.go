@@ -3,19 +3,19 @@ package spine
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/poisnoir/mad-go"
 	"github.com/poisnoir/spine-go/internal/globals"
-	"github.com/xtaci/kcp-go/v5"
 )
 
 type Subscriber[K any] struct {
 	namespace    *Namespace
 	subscribedTo string
 
-	conn        *kcp.UDPSession
+	conn        net.Conn
 	ctx         context.Context
 	cancel      context.CancelFunc
 	isConnected bool
@@ -58,7 +58,6 @@ func (s *Subscriber[K]) Get() (K, error) {
 	var zero K
 	select {
 	case <-s.ctx.Done():
-		// s.ctx.Err() returns the actual error (e.g., context.Canceled)
 		return zero, s.ctx.Err()
 	case <-s.pushSig:
 		s.mutex.RLock()
@@ -80,14 +79,6 @@ func (s *Subscriber[K]) run() {
 			_, err := s.conn.Read(buf)
 			if err != nil {
 				s.isConnected = false
-				continue
-			}
-
-			if buf[0] == globals.PING_CODE {
-				_, err = s.conn.Write([]byte{globals.PONG_CODE})
-				if err != nil {
-					s.isConnected = false
-				}
 				continue
 			}
 
@@ -118,17 +109,10 @@ func (s *Subscriber[K]) connect() error {
 		"connect",
 	)
 
-	// finding the service
-	address, err := s.namespace.GetService(s.subscribedTo, s.ctx)
-	if err != nil {
-		logger.Error("unable to find the service", "error", err)
-		return err // the only way to fail here is to run out of context
-	}
-
 	// establishing connection
-	sess, err := kcp.DialWithOptions(address, s.namespace.encryption, 10, 3)
+	conn, err := net.Dial("unix", "/tmp/spine/service/"+s.subscribedTo)
 	if err != nil {
-		logger.Error("failed to dial service", "error", err)
+		logger.Error("failed to dial publisher", "error", err)
 		return err
 	}
 
@@ -141,7 +125,7 @@ func (s *Subscriber[K]) connect() error {
 	keyCode := s.serializer.Code()
 	n := copy(buf, keyCode)
 
-	n, err = write(sess, buf, n, true)
+	n, err = write(conn, buf, n, true)
 	if err != nil {
 		logger.Error("failed to validate service input type", "error", err)
 		return err
@@ -155,7 +139,7 @@ func (s *Subscriber[K]) connect() error {
 		return err
 	}
 
-	s.conn = sess
+	s.conn = conn
 	s.isConnected = true
 
 	return nil

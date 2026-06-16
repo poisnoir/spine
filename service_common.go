@@ -7,15 +7,13 @@ import (
 	"net"
 	"slices"
 
-	"github.com/grandcat/zeroconf"
 	"github.com/poisnoir/mad-go"
 	"github.com/poisnoir/spine-go/internal/globals"
-	"github.com/xtaci/kcp-go/v5"
 )
 
 // bunch of same operations in service and threaded service
 
-func generateService[K any, V any](namespace *Namespace, name string) (*mad.Mad[K], *mad.Mad[V], *kcp.Listener, *zeroconf.Server, error) {
+func generateService[K any, V any](namespace *Namespace, name string) (*mad.Mad[K], *mad.Mad[V], net.Listener, error) {
 	logger := namespace.logger.With(
 		namespace.Name(),
 		"service",
@@ -26,36 +24,28 @@ func generateService[K any, V any](namespace *Namespace, name string) (*mad.Mad[
 	keyEnc, err := mad.NewMad[K]()
 	if err != nil {
 		logger.Error("unable to create key encoder", "error", err)
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	valueEnc, err := mad.NewMad[V]()
 	if err != nil {
 		logger.Error("unable to create value encoder", "error", err)
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	listener, err := kcp.ListenWithOptions(":0", namespace.encryption, 10, 3)
+	socketPath := "/tmp/spine/service/" + name
+	listener, err := createListener(socketPath)
 	if err != nil {
 		logger.Error("unable to create listener", "error", err)
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
-
-	server, err := zeroconf.Register(
-		name,
-		"_"+namespace.Name()+globals.ZERO_CONF_NODE_TYPE,
-		globals.ZERO_CONF_DOMAIN,
-		listener.Addr().(*net.UDPAddr).Port,
-		[]string{"type=" + globals.ZERO_CONF_SERVICE},
-		nil,
-	)
 
 	if err != nil {
 		logger.Error("unable to register service to zeroconf", "error", err)
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	return keyEnc, valueEnc, listener, server, nil
+	return keyEnc, valueEnc, listener, nil
 
 }
 
@@ -80,7 +70,7 @@ func establishConnection(conn io.ReadWriteCloser, keyCode []byte, valueCode []by
 		logger.Error("failed to establish connection")
 		return err
 	}
-	
+
 	if !slices.Equal(valueCode, buf[:n]) {
 		logger.Error("failed to establish connection, invalid value code")
 		return fmt.Errorf("invalid value code")
@@ -105,43 +95,33 @@ func handleCallerRequest[K any, V any](conn io.ReadWriteCloser, keySerializer *m
 			return
 		}
 
-		switch buf[0] {
-		case globals.PING_CODE:
-			conn.Write([]byte{globals.PONG_CODE})
+		var key K
+		err = keySerializer.Decode(buf[:n], &key)
+		if err != nil {
+			logger.Error("unable to decode key", "error", err)
+			conn.Write([]byte{globals.ERROR_SERIALIZER_ERROR_CODE})
+			continue
+		}
 
-		case globals.SERVICE_REQUEST:
-			var key K
-			err = keySerializer.Decode(buf[1:n], &key)
-			if err != nil {
-				logger.Error("unable to decode key", "error", err)
-				conn.Write([]byte{globals.ERROR_SERIALIZER_ERROR_CODE})
-				continue
-			}
-
-			res := processRequest(key)
-			if res.err != nil {
-				logger.Error("handler failed", "error", err)
-				errMsg := res.err.Error()
-				buf[0] = globals.ERROR_SERVICE_ERROR_CODE
-				stringSerializer.Encode(&errMsg, buf[1:])
-				_, err = conn.Write(buf[:stringSerializer.GetRequiredSize(&errMsg)+1])
-				if err != nil {
-					logger.Error("failed to write from connection", "error", err)
-					return
-				}
-			}
-
-			buf[0] = globals.OK_STATUS_CODE
-			valueSerializer.Encode(&res.data, buf[1:])
-			_, err = conn.Write(buf[:valueSerializer.GetRequiredSize(&res.data)+1])
+		res := processRequest(key)
+		if res.err != nil {
+			logger.Error("handler failed", "error", err)
+			errMsg := res.err.Error()
+			buf[0] = globals.ERROR_SERVICE_ERROR_CODE
+			stringSerializer.Encode(&errMsg, buf[1:])
+			_, err = conn.Write(buf[:stringSerializer.GetRequiredSize(&errMsg)+1])
 			if err != nil {
 				logger.Error("failed to write from connection", "error", err)
 				return
 			}
+		}
 
-		default:
-			logger.Error("received invalid operation code", "error", err)
-			conn.Write([]byte{globals.ERROR_INVALID_OPERATION_CODE})
+		buf[0] = globals.OK_STATUS_CODE
+		valueSerializer.Encode(&res.data, buf[1:])
+		_, err = conn.Write(buf[:valueSerializer.GetRequiredSize(&res.data)+1])
+		if err != nil {
+			logger.Error("failed to write from connection", "error", err)
+			return
 		}
 
 	}
