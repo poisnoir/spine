@@ -1,6 +1,7 @@
 package spine
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,9 +14,9 @@ import (
 )
 
 type Publisher[K any] struct {
-	namespace *Namespace
-	name      string
-	logger    *slog.Logger
+	node   *Node
+	name   string
+	logger *slog.Logger
 
 	serializer *mad.Mad[K]
 
@@ -27,23 +28,29 @@ type Publisher[K any] struct {
 	sendSig    chan struct{}
 	lastDataMu sync.RWMutex
 	lastData   K
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
-func NewPublisher[K any](ns *Namespace, name string) (*Publisher[K], error) {
+func NewPublisher[K any](node *Node, name string) (*Publisher[K], error) {
 
 	serializer, err := mad.NewMad[K]()
 	if err != nil {
 		return nil, err
 	}
-	listener, err := createListener("/tmp/spine/publisher/" + name)
+	socketPath := "/tmp/spine/publisher/" + node.namespace + "/" + name
+	listener, err := createListener(socketPath)
 	if err != nil {
 		return nil, err
 	}
 
+	ctx, cancel := context.WithCancel(node.ctx)
+
 	p := &Publisher[K]{
-		namespace: ns,
-		name:      name,
-		logger:    ns.logger,
+		node:   node,
+		name:   name,
+		logger: node.logger,
 
 		serializer: serializer,
 
@@ -52,9 +59,12 @@ func NewPublisher[K any](ns *Namespace, name string) (*Publisher[K], error) {
 		clients:    make([]io.ReadWriteCloser, 0),
 
 		sendSig: make(chan struct{}, 1),
+
+		ctx:    ctx,
+		cancel: cancel,
 	}
 
-	go runListener(listener, ns.logger, p.registerSubscriber)
+	go runListener(listener, node.logger, p.registerSubscriber)
 	go p.run()
 
 	return p, nil
@@ -64,6 +74,14 @@ func (p *Publisher[K]) run() {
 
 	for {
 		select {
+		case <-p.ctx.Done():
+			p.clientMu.Lock()
+			for _, client := range p.clients {
+				client.Close()
+			}
+			p.clients = nil
+			p.clientMu.Unlock()
+			return
 		case <-p.sendSig:
 			p.lastDataMu.RLock()
 			tempData := p.lastData
@@ -74,7 +92,7 @@ func (p *Publisher[K]) run() {
 				p.logger.Error("payload size too big", "size", payloadSize)
 				continue
 			}
-			bufPtr := p.namespace.bufferPool.Get().(*[]byte)
+			bufPtr := p.node.bufferPool.Get().(*[]byte)
 			buf := *bufPtr
 			p.serializer.Encode(&tempData, buf)
 
@@ -101,7 +119,7 @@ func (p *Publisher[K]) run() {
 
 			go func(b *[]byte) {
 				wg.Wait()
-				p.namespace.bufferPool.Put(b)
+				p.node.bufferPool.Put(b)
 			}(bufPtr)
 
 		case deadClient := <-p.deadClient:
@@ -115,17 +133,22 @@ func (p *Publisher[K]) run() {
 	}
 }
 
+func (p *Publisher[K]) Close() {
+	p.cancel()
+	p.listener.Close()
+}
+
 func (p *Publisher[K]) registerSubscriber(conn io.ReadWriteCloser) {
 
 	var err error
-	bufPtr := p.namespace.bufferPool.Get().(*[]byte)
+	bufPtr := p.node.bufferPool.Get().(*[]byte)
 	buf := *bufPtr
 
 	defer func() {
 		if err != nil {
 			conn.Close()
 		}
-		p.namespace.bufferPool.Put(bufPtr)
+		p.node.bufferPool.Put(bufPtr)
 	}()
 
 	n, err := conn.Read(buf)

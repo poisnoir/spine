@@ -7,10 +7,12 @@ import (
 	"sync"
 
 	"github.com/poisnoir/mad-go"
+	"github.com/poisnoir/spine-go/internal/globals"
 )
 
-type Namespace struct {
-	name string
+type Node struct {
+	namespace string
+	name      string
 
 	ctx context.Context
 
@@ -21,23 +23,24 @@ type Namespace struct {
 	spinedConn net.Conn
 }
 
-func JointNamespace(name string, ctx context.Context, logger *slog.Logger) (*Namespace, error) {
+func CreateNode(namespace string, name string, ctx context.Context, logger *slog.Logger) (*Node, error) {
 
-	conn, err := net.Dial("unix", "/tmp/spine/spined")
+	conn, err := net.Dial("unixpacket", "/tmp/spine/spined")
 	if err != nil {
 		logger.Warn("Could not connect to spined daemon. Operating in local-only mode.")
 		conn = nil
 	}
 
 	stringSer, _ := mad.NewMad[string]()
-	return &Namespace{
-		name: name,
+	return &Node{
+		namespace: namespace,
+		name:      name,
 
 		ctx: ctx,
 
 		logger: logger,
 		bufferPool: sync.Pool{New: func() any {
-			b := make([]byte, 4096)
+			b := make([]byte, globals.MAX_PACKET_SIZE)
 			return &b
 		}},
 		stringSerializer: stringSer,
@@ -46,7 +49,7 @@ func JointNamespace(name string, ctx context.Context, logger *slog.Logger) (*Nam
 	}, nil
 }
 
-func (ns *Namespace) Name() string {
+func (ns *Node) Name() string {
 	return ns.name
 }
 

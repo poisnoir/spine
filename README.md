@@ -14,18 +14,27 @@ Spine-Go employs a dual-path architecture to ensure you never sacrifice performa
 ## ✨ Features
 *   **Zero IDL Boilerplate**: No `.proto` or `.msg` files. Define your services and topics using native Go types and generics.
 *   **Compile-Time Type Safety**: Leverages Go 1.18+ generics to catch data mismatches before your code even runs.
-*   **Extreme Performance**: Optimized buffer pooling and the `mad-go` serialization engine ensure minimal GC pressure and high throughput.
 *   **Resilient Connectivity**: Built-in exponential backoff and automatic reconnection logic.
 *   **Hybrid Discovery**: Works in "Local-Only" mode without any external dependencies, or "Global" mode by connecting to the `spined` sidecar.
 
 ---
 
 ## 📊 Performance Benchmarks
-*Tested on AMD Ryzen Threadripper PRO 5945WX (Linux/amd64)*
+To run the benchmarks and see how Spine-Go performs on your machine:
+```
+# Run all benchmarks
+go test -bench=. -benchmem
+
+# Run specific service benchmarks
+go test -bench=BenchmarkServiceCall
+go test -bench=BenchmarkThreadedServiceCall
+```
+
+*Tested on AMD Ryzen Threadripper PRO 5945WX on windows computer in wsl environment*
 
 | Pattern | Throughput | Latency (ns/op) | Memory (B/op) | Allocs/op |
 | :--- | :--- | :--- | :--- | :--- |
-| **Pub/Sub** | ~53,000 msg/sec | 18,896 | 221 | 8 |
+| **Pub/Sub** | ~70,000 msg/sec | 16,412 | 221 | 8 |
 | **Service Call (RPC)** | ~33,000 req/sec | 30,578 | 417 | 13 |
 | **Threaded Service** | ~27,000 req/sec | 32,909 | 271 | 9 |
 

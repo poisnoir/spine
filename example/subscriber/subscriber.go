@@ -14,10 +14,9 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx := context.Background()
 
-	ns, _ := spine.JointNamespace("example", ctx, logger)
+	node, _ := spine.CreateNode("example", "subscriber_sample", ctx, logger)
 
-	sub1, _ := spine.NewSubscriber[uint32](ns, "temperature")
-	_, _ = spine.NewSubscriber[uint32](ns, "temperature")
+	sub1, _ := spine.NewSubscriber[uint32](node, "temperature")
 
 	for {
 		fmt.Println(sub1.Get())

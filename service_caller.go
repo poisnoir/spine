@@ -11,7 +11,7 @@ import (
 )
 
 type ServiceCaller[K any, V any] struct {
-	namespace   *Namespace
+	node        *Node
 	serviceName string
 
 	keySerializer   *mad.Mad[K]
@@ -25,7 +25,7 @@ type ServiceCaller[K any, V any] struct {
 	isConnected bool
 }
 
-func NewServiceCaller[K any, V any](namespace *Namespace, serviceName string) (*ServiceCaller[K, V], error) {
+func NewServiceCaller[K any, V any](node *Node, serviceName string) (*ServiceCaller[K, V], error) {
 
 	keySer, err := mad.NewMad[K]()
 	if err != nil {
@@ -37,10 +37,10 @@ func NewServiceCaller[K any, V any](namespace *Namespace, serviceName string) (*
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(namespace.ctx)
+	ctx, cancel := context.WithCancel(node.ctx)
 
 	sc := &ServiceCaller[K, V]{
-		namespace:   namespace,
+		node:        node,
 		serviceName: serviceName,
 
 		keySerializer:   keySer,
@@ -65,25 +65,28 @@ func (sc *ServiceCaller[K, V]) run() {
 	for {
 		select {
 		case <-sc.ctx.Done():
-			sc.conn.Close()
+			if sc.conn != nil {
+				sc.conn.Close()
+			}
 			return
-		default:
-			if sc.isConnected {
-				select {
-				case requestData := <-sc.requests:
-					output, err := sc.send(requestData.input)
-					if err != nil {
-						// Todo: Log
-						sc.isConnected = false
-					}
-					requestData.output <- serviceOutput[V]{data: output, err: err}
-				}
-			} else {
+		case requestData := <-sc.requests:
+			if !sc.isConnected {
 				bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), sc.ctx)
 				_ = backoff.Retry(sc.connect, bo)
 			}
-		}
 
+			if err := requestData.ctx.Err(); err != nil {
+				requestData.output <- serviceOutput[V]{err: err}
+				continue
+			}
+
+			output, err := sc.send(requestData.input)
+			if err != nil {
+				sc.node.logger.Error("failed to send request", "error", err)
+				sc.isConnected = false
+			}
+			requestData.output <- serviceOutput[V]{data: output, err: err}
+		}
 	}
 }
 
@@ -96,8 +99,8 @@ func (sc *ServiceCaller[K, V]) send(key K) (V, error) {
 		return v, fmt.Errorf(globals.ERROR_PAYLOAD_SIZE)
 	}
 
-	bufPtr := sc.namespace.bufferPool.Get().(*[]byte)
-	defer sc.namespace.bufferPool.Put(bufPtr)
+	bufPtr := sc.node.bufferPool.Get().(*[]byte)
+	defer sc.node.bufferPool.Put(bufPtr)
 	buf := *bufPtr
 
 	sc.keySerializer.Encode(&key, buf)
@@ -109,7 +112,7 @@ func (sc *ServiceCaller[K, V]) send(key K) (V, error) {
 
 	if buf[0] != globals.OK_STATUS_CODE {
 		var errMsg string
-		_ = sc.namespace.stringSerializer.Decode(buf[1:], &errMsg)
+		_ = sc.node.stringSerializer.Decode(buf[1:], &errMsg)
 		return v, fmt.Errorf("call error: %s", errMsg)
 	}
 
@@ -123,14 +126,24 @@ func (sc *ServiceCaller[K, V]) Call(key K, ctx context.Context) (V, error) {
 
 	var zero V
 	data := serviceRequest[K, V]{
+		ctx:    ctx,
 		input:  key,
 		output: make(chan serviceOutput[V], 1),
 	}
-	sc.requests <- data
+
+	select {
+	case sc.requests <- data:
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-sc.ctx.Done():
+		return zero, sc.ctx.Err()
+	}
 
 	select {
 	case <-ctx.Done():
 		return zero, ctx.Err()
+	case <-sc.ctx.Done():
+		return zero, sc.ctx.Err()
 	case output := <-data.output:
 		return output.data, output.err
 	}
@@ -142,44 +155,38 @@ func (sc *ServiceCaller[K, V]) Close() {
 
 func (sc *ServiceCaller[K, V]) connect() error {
 
-	logger := sc.namespace.logger.With(
-		sc.namespace.Name(),
+	logger := sc.node.logger.With(
+		sc.node.Name(),
 		"service_caller",
 		sc.serviceName,
 		"connect",
 	)
 
-	if sc.namespace.spinedConn != nil {
-		err := registerServiceCaller(sc.serviceName, sc.keySerializer.Code(), sc.valueSerializer.Code())
-		if err != nil {
-			return err
-		}
-	}
-
 	// establishing connection
-	conn, err := net.Dial("unix", "/tmp/spine/service/"+sc.serviceName)
+	conn, err := net.Dial("unixpacket", "/tmp/spine/service/"+sc.node.namespace+"/"+sc.serviceName)
 	if err != nil {
 		logger.Error("failed to dial service", "error", err)
 		return err
 	}
 
 	// getting buffer for comm
-	bufPtr := sc.namespace.bufferPool.Get().(*[]byte)
-	defer sc.namespace.bufferPool.Put(bufPtr)
+	bufPtr := sc.node.bufferPool.Get().(*[]byte)
+	defer sc.node.bufferPool.Put(bufPtr)
 	buf := *bufPtr
 
 	// validating input/output service types
 	keyCode := sc.keySerializer.Code()
 	n := copy(buf, keyCode)
 
-	n, err = write(conn, buf, n, true)
+	_, err = conn.Write(buf[:n])
 	if err != nil {
-		logger.Error("failed to validate service input type", "error", err)
+		logger.Error("failed to write into socket", "error", err)
 		return err
-	} else if n != 1 {
-		err = fmt.Errorf("response is corrupted")
-		logger.Error("failed to validate service input type", "error", err)
-		return err
+	}
+
+	_, err = conn.Read(buf)
+	if err != nil {
+		logger.Error("failed to read from socket", "error", err)
 	} else if buf[0] != globals.OK_STATUS_CODE {
 		err = fmt.Errorf("service data type is different")
 		logger.Error("failed to validate service input type", "error", err)
@@ -189,12 +196,14 @@ func (sc *ServiceCaller[K, V]) connect() error {
 	valueCode := sc.valueSerializer.Code()
 	n = copy(buf, valueCode)
 
-	n, err = write(conn, buf, n, true)
+	_, err = conn.Write(buf[:n])
 	if err != nil {
-		logger.Error("failed to validate service output type", "error", err)
-	} else if n != 1 {
-		err = fmt.Errorf("response is corrupted")
-		logger.Error("failed to validate service output type", "error", err)
+		logger.Error("failed to write into socket", "error", err)
+		return err
+	}
+	_, err = conn.Read(buf)
+	if err != nil {
+		logger.Error("failed to read from socket", "error", err)
 		return err
 	} else if buf[0] != globals.OK_STATUS_CODE {
 		err = fmt.Errorf("service data type is different")
@@ -205,5 +214,4 @@ func (sc *ServiceCaller[K, V]) connect() error {
 	sc.isConnected = true
 
 	return nil
-
 }

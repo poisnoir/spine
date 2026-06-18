@@ -14,9 +14,9 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx := context.Background()
-	ns, _ := spine.JointNamespace("example", ctx, logger)
+	node, _ := spine.CreateNode("example", "publisher_sample", ctx, logger)
 
-	pub, err := spine.NewPublisher[uint32](ns, "temperature")
+	pub, err := spine.NewPublisher[uint32](node, "temperature")
 	if err != nil {
 		log.Fatal(err)
 	}

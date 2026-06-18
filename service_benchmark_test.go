@@ -10,7 +10,7 @@ import (
 func BenchmarkServiceCall(b *testing.B) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := JointNamespace("bench", ctx, logger)
+	ns, err := CreateNode("bench", "test", ctx, logger)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func BenchmarkServiceCallParallel(b *testing.B) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
 
-	ns, err := JointNamespace("bench_parallel", ctx, logger)
+	ns, err := CreateNode("bench_parallel", "test", ctx, logger)
 	if err != nil {
 		b.Fatal(err)
 	}

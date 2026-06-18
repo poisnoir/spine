@@ -41,6 +41,6 @@ func createListener(path string) (net.Listener, error) {
 	}
 
 	_ = os.Remove(path)
-	listener, err := net.Listen("unix", path)
+	listener, err := net.Listen("unixpacket", path)
 	return listener, err
 }

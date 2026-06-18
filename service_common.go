@@ -1,6 +1,7 @@
 package spine
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,9 +14,9 @@ import (
 
 // bunch of same operations in service and threaded service
 
-func generateService[K any, V any](namespace *Namespace, name string) (*mad.Mad[K], *mad.Mad[V], net.Listener, error) {
-	logger := namespace.logger.With(
-		namespace.Name(),
+func generateService[K any, V any](node *Node, name string) (*mad.Mad[K], *mad.Mad[V], net.Listener, error) {
+	logger := node.logger.With(
+		node.Name(),
 		"service",
 		name,
 		"new service",
@@ -33,7 +34,7 @@ func generateService[K any, V any](namespace *Namespace, name string) (*mad.Mad[
 		return nil, nil, nil, err
 	}
 
-	socketPath := "/tmp/spine/service/" + name
+	socketPath := "/tmp/spine/service/" + node.namespace + "/" + name
 	listener, err := createListener(socketPath)
 	if err != nil {
 		logger.Error("unable to create listener", "error", err)
@@ -80,6 +81,7 @@ func handleCallerRequest[K any, V any](conn io.ReadWriteCloser, keySerializer *m
 	defer conn.Close()
 	err := establishConnection(conn, []byte(keySerializer.Code()), []byte(valueSerializer.Code()), buf, logger)
 	if err != nil {
+		logger.Error("failed to stablish connection", "error", err)
 		return
 	}
 
@@ -123,6 +125,7 @@ func handleCallerRequest[K any, V any](conn io.ReadWriteCloser, keySerializer *m
 }
 
 type serviceRequest[K any, V any] struct {
+	ctx    context.Context
 	input  K
 	output chan serviceOutput[V]
 }

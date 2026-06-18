@@ -5,17 +5,19 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 )
 
 func BenchmarkPubSub(b *testing.B) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := JointNamespace("bench_pubsub", ctx, logger)
+	ns, err := CreateNode("bench_pubsub", "test", ctx, logger)
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	topic := "bench_topic"
+
 	pub, err := NewPublisher[uint32](ns, topic)
 	if err != nil {
 		b.Fatal(err)
@@ -25,6 +27,8 @@ func BenchmarkPubSub(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+
+	time.Sleep(time.Millisecond * 100)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

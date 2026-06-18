@@ -12,7 +12,7 @@ import (
 )
 
 type Subscriber[K any] struct {
-	namespace    *Namespace
+	node         *Node
 	subscribedTo string
 
 	conn        net.Conn
@@ -27,17 +27,17 @@ type Subscriber[K any] struct {
 	serializer *mad.Mad[K]
 }
 
-func NewSubscriber[K any](namespace *Namespace, topic string) (*Subscriber[K], error) {
+func NewSubscriber[K any](node *Node, topic string) (*Subscriber[K], error) {
 
 	decoder, err := mad.NewMad[K]()
 	if err != nil {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(namespace.ctx)
+	ctx, cancel := context.WithCancel(node.ctx)
 
 	sub := &Subscriber[K]{
-		namespace:    namespace,
+		node:         node,
 		subscribedTo: topic,
 
 		ctx:         ctx,
@@ -48,9 +48,6 @@ func NewSubscriber[K any](namespace *Namespace, topic string) (*Subscriber[K], e
 
 		serializer: decoder,
 	}
-
-	bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), sub.ctx)
-	_ = backoff.Retry(sub.connect, bo)
 
 	go sub.run()
 	return sub, nil
@@ -71,20 +68,44 @@ func (s *Subscriber[K]) Get() (K, error) {
 
 func (s *Subscriber[K]) run() {
 
-	bufPtr := s.namespace.bufferPool.Get().(*[]byte)
+	bufPtr := s.node.bufferPool.Get().(*[]byte)
+	defer s.node.bufferPool.Put(bufPtr)
 	buf := *bufPtr
 
 	var data K
 
 	for {
-		if s.isConnected {
-			_, err := s.conn.Read(buf)
-			if err != nil {
-				s.isConnected = false
+		select {
+		case <-s.ctx.Done():
+			if s.conn != nil {
+				s.conn.Close()
+			}
+			return
+		default:
+			if !s.isConnected {
+				bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), s.ctx)
+				err := backoff.Retry(s.connect, bo)
+				if err != nil {
+					return
+				}
 				continue
 			}
 
-			s.serializer.Decode(buf[1:], &data)
+			n, err := s.conn.Read(buf)
+			if err != nil {
+				s.node.logger.Warn("subscriber connection lost", "topic", s.subscribedTo, "error", err)
+				s.isConnected = false
+				if s.conn != nil {
+					s.conn.Close()
+				}
+				continue
+			}
+
+			err = s.serializer.Decode(buf[:n], &data)
+			if err != nil {
+				s.node.logger.Error("subscriber decode failed", "topic", s.subscribedTo, "error", err)
+				continue
+			}
 
 			s.mutex.Lock()
 			s.lastData = data
@@ -94,36 +115,28 @@ func (s *Subscriber[K]) run() {
 			case s.pushSig <- struct{}{}:
 			default:
 			}
-
-		} else {
-			bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), s.ctx)
-			_ = backoff.Retry(s.connect, bo)
 		}
 	}
 }
 
 func (s *Subscriber[K]) connect() error {
 
-	logger := s.namespace.logger.With(
-		s.namespace.Name(),
+	logger := s.node.logger.With(
+		s.node.Name(),
 		"subscriber",
 		s.subscribedTo,
 		"connect",
 	)
 
-	// establishing connection
-	conn, err := net.Dial("unix", "/tmp/spine/publisher/"+s.subscribedTo)
+	conn, err := net.Dial("unixpacket", "/tmp/spine/publisher/"+s.node.namespace+"/"+s.subscribedTo)
 	if err != nil {
-		logger.Error("failed to dial publisher", "error", err)
 		return err
 	}
 
-	// getting buffer for comm
-	bufPtr := s.namespace.bufferPool.Get().(*[]byte)
-	defer s.namespace.bufferPool.Put(bufPtr)
+	bufPtr := s.node.bufferPool.Get().(*[]byte)
+	defer s.node.bufferPool.Put(bufPtr)
 	buf := *bufPtr
 
-	// validating input/output service types
 	keyCode := s.serializer.Code()
 	n := copy(buf, keyCode)
 

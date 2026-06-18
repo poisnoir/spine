@@ -12,9 +12,9 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx := context.Background()
-	ns, _ := spine.JointNamespace("example", ctx, logger)
+	node, _ := spine.CreateNode("example", "service_caller_sample", ctx, logger)
 
-	c, _ := spine.NewServiceCaller[string, string](ns, "print")
+	c, _ := spine.NewServiceCaller[string, string](node, "print")
 
 	result, _ := c.Call("hello world", ctx)
 	fmt.Println(result)

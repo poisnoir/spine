@@ -6,14 +6,12 @@ import (
 	"io"
 	"net"
 
-	"github.com/grandcat/zeroconf"
 	"github.com/poisnoir/mad-go"
 )
 
 type ThreadedService[K any, V any] struct {
-	namespace *Namespace
-	name      string
-	server    *zeroconf.Server
+	node *Node
+	name string
 
 	context  context.Context
 	cancel   context.CancelFunc
@@ -22,22 +20,21 @@ type ThreadedService[K any, V any] struct {
 	keySerializer   *mad.Mad[K]
 	valueSerializer *mad.Mad[V]
 
-	requests chan serviceRequest[K, V]
-	handler  func(K) (V, error)
+	handler func(K) (V, error)
 }
 
-func NewThreadedService[K any, V any](namespace *Namespace, name string, handler func(K) (V, error)) (*ThreadedService[K, V], error) {
+func NewThreadedService[K any, V any](node *Node, name string, handler func(K) (V, error)) (*ThreadedService[K, V], error) {
 
-	keyEnc, valueEnc, listener, err := generateService[K, V](namespace, name)
+	keyEnc, valueEnc, listener, err := generateService[K, V](node, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create service: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(namespace.ctx)
+	ctx, cancel := context.WithCancel(node.ctx)
 
 	ts := &ThreadedService[K, V]{
-		namespace: namespace,
-		name:      name,
+		node: node,
+		name: name,
 
 		context: ctx,
 		cancel:  cancel,
@@ -45,30 +42,25 @@ func NewThreadedService[K any, V any](namespace *Namespace, name string, handler
 		handler:         handler,
 		keySerializer:   keyEnc,
 		valueSerializer: valueEnc,
-
-		requests: make(chan serviceRequest[K, V], 100),
 	}
 
-	// todo fix me pls
-	logger := namespace.logger
-
-	go runListener(listener, logger, ts.clientHandler) // stops when listener closes
+	go runListener(listener, node.logger, ts.clientHandler) // stops when listener closes
 	return ts, nil
 }
 
 func (s *ThreadedService[K, V]) clientHandler(conn io.ReadWriteCloser) {
 
-	logger := s.namespace.logger.With(
-		s.namespace.Name(),
+	logger := s.node.logger.With(
+		s.node.Name(),
 		"service",
 		s.name,
 		"client handler",
 	)
 
-	bufPtr := s.namespace.bufferPool.Get().(*[]byte)
-	defer s.namespace.bufferPool.Put(bufPtr)
+	bufPtr := s.node.bufferPool.Get().(*[]byte)
+	defer s.node.bufferPool.Put(bufPtr)
 
-	handleCallerRequest(conn, s.keySerializer, s.valueSerializer, s.namespace.stringSerializer, *bufPtr, s.processRequest, logger)
+	handleCallerRequest(conn, s.keySerializer, s.valueSerializer, s.node.stringSerializer, *bufPtr, s.processRequest, logger)
 
 }
 

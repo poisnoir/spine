@@ -12,7 +12,7 @@ import (
 func TestService(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := JointNamespace("test_service", ctx, logger)
+	ns, err := CreateNode("test_service", "test", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestService(t *testing.T) {
 func TestThreadedService(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := JointNamespace("test_threaded_service", ctx, logger)
+	ns, err := CreateNode("test_threaded_service", "test", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestThreadedService(t *testing.T) {
 func TestServiceCaller_ContextCancel(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := JointNamespace("test_cancel", ctx, logger)
+	ns, err := CreateNode("test_cancel", "test", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestServiceCaller_ContextCancel(t *testing.T) {
 func TestThreadedService_Parallel(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := JointNamespace("test_parallel", ctx, logger)
+	ns, err := CreateNode("test_parallel", "test", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

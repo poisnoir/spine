@@ -13,7 +13,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx := context.Background()
 
-	ns, _ := spine.JointNamespace("example", ctx, logger)
+	node, _ := spine.CreateNode("example", "subscriber_sample", ctx, logger)
 
 	lenFunc := func(input string) (uint32, error) {
 		return uint32(len(input)), nil
@@ -24,8 +24,8 @@ func main() {
 		return "printed " + input, nil
 	}
 
-	_, _ = spine.NewService(ns, "string_length", lenFunc)
-	_, _ = spine.NewService(ns, "print", printFunc)
+	_, _ = spine.NewService(node, "string_length", lenFunc)
+	_, _ = spine.NewService(node, "print", printFunc)
 
 	select {}
 
