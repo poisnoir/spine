@@ -27,7 +27,7 @@ func TestPubSub_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sub.Stop()
+	defer sub.Close()
 
 	time.Sleep(time.Millisecond * 100)
 
@@ -67,7 +67,7 @@ func TestPubSub_MultipleSubscribers(t *testing.T) {
 			t.Fatal(err)
 		}
 		subs[i] = s
-		defer s.Stop()
+		defer s.Close()
 	}
 
 	time.Sleep(time.Millisecond * 100)

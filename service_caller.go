@@ -37,6 +37,11 @@ func NewServiceCaller[K any, V any](node *Node, serviceName string) (*ServiceCal
 		return nil, err
 	}
 
+	err = node.registerToSpined(serviceName, globals.SERVICE_CALLER_TYPE)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithCancel(node.ctx)
 
 	sc := &ServiceCaller[K, V]{
@@ -151,8 +156,9 @@ func (sc *ServiceCaller[K, V]) Call(key K, ctx context.Context) (V, error) {
 	}
 }
 
-func (sc *ServiceCaller[K, V]) Close() {
+func (sc *ServiceCaller[K, V]) Close() error {
 	sc.cancel()
+	return nil
 }
 
 func (sc *ServiceCaller[K, V]) connect() error {

@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"github.com/poisnoir/mad-go"
+	"github.com/poisnoir/spine-go/internal/globals"
 )
 
 type Service[K any, V any] struct {
@@ -29,6 +30,11 @@ func NewService[K any, V any](node *Node, name string, handler func(K) (V, error
 	keySer, valueSer, listener, err := generateService[K, V](node, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create service: %v", err)
+	}
+
+	err = node.registerToSpined(name, globals.SERVICE_TYPE)
+	if err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithCancel(node.ctx)
@@ -127,9 +133,9 @@ func (s *Service[K, V]) runHandler() {
 	}
 }
 
-func (s *Service[K, V]) Close() {
-	s.listener.Close()
+func (s *Service[K, V]) Close() error {
 	s.cancel()
+	return s.listener.Close()
 }
 
 func (s *Service[K, V]) Name() string {

@@ -34,6 +34,11 @@ func NewSubscriber[K any](node *Node, topic string) (*Subscriber[K], error) {
 		return nil, err
 	}
 
+	err = node.registerToSpined(topic, globals.SUBSCRIBER_TYPE)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithCancel(node.ctx)
 
 	sub := &Subscriber[K]{
@@ -161,8 +166,9 @@ func (s *Subscriber[K]) connect() error {
 	return nil
 }
 
-func (s *Subscriber[K]) Stop() {
+func (s *Subscriber[K]) Close() error {
 	s.cancel()
+	return nil
 }
 
 func (s *Subscriber[K]) SubscribedTo() string {

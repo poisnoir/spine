@@ -2,6 +2,7 @@ package spine
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -53,6 +54,36 @@ func (ns *Node) Name() string {
 	return ns.name
 }
 
-func registerServiceCaller(name string, inputCode string, outputCode string) error {
-	return nil
+func (n *Node) registerToSpined(name string, elementType uint8) error {
+
+	// if nodes are running locally
+	if n.spinedConn == nil {
+		return nil
+	}
+
+	bufPtr := n.bufferPool.Get().(*[]byte)
+	defer n.bufferPool.Put(bufPtr)
+	buf := *bufPtr
+
+	buf[0] = globals.SPINED_REGISTER
+	buf[1] = elementType
+	n.stringSerializer.Encode(&name, buf[2:])
+
+	_, err := n.spinedConn.Write(buf)
+	if err != nil {
+		return err
+	}
+
+	buf_size, err := n.spinedConn.Read(buf)
+	if err != nil {
+		return err
+	}
+
+	if buf[0] == globals.OK_STATUS_CODE {
+		return nil
+	}
+	var errorMsg string
+	_ = n.stringSerializer.Decode(buf[1:buf_size], &errorMsg)
+
+	return fmt.Errorf("failed to register to spined: %s", errorMsg)
 }

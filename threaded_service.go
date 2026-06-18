@@ -39,6 +39,7 @@ func NewThreadedService[K any, V any](node *Node, name string, handler func(K) (
 		context: ctx,
 		cancel:  cancel,
 
+		listener:        listener,
 		handler:         handler,
 		keySerializer:   keyEnc,
 		valueSerializer: valueEnc,
@@ -69,6 +70,7 @@ func (ts *ThreadedService[K, V]) processRequest(key K) serviceOutput[V] {
 	return serviceOutput[V]{data: result, err: err}
 }
 
-func (ts *ThreadedService[K, V]) Close() {
+func (ts *ThreadedService[K, V]) Close() error {
 	ts.cancel()
+	return ts.listener.Close()
 }

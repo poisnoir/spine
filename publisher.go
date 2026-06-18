@@ -39,6 +39,12 @@ func NewPublisher[K any](node *Node, name string) (*Publisher[K], error) {
 	if err != nil {
 		return nil, err
 	}
+
+	err = node.registerToSpined(name, globals.PUBLISHER_TYPE)
+	if err != nil {
+		return nil, err
+	}
+
 	socketPath := "/tmp/spine/publisher/" + node.namespace + "/" + name
 	listener, err := createListener(socketPath)
 	if err != nil {
@@ -133,9 +139,9 @@ func (p *Publisher[K]) run() {
 	}
 }
 
-func (p *Publisher[K]) Close() {
+func (p *Publisher[K]) Close() error {
 	p.cancel()
-	p.listener.Close()
+	return p.listener.Close()
 }
 
 func (p *Publisher[K]) registerSubscriber(conn io.ReadWriteCloser) {
