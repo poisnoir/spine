@@ -105,14 +105,16 @@ func (sc *ServiceCaller[K, V]) send(key K) (V, error) {
 
 	sc.keySerializer.Encode(&key, buf)
 
-	_, err := write(sc.conn, buf, requestSize, true)
+	// _, err := write(sc.conn, buf, requestSize, true)
+	_, err := sc.conn.Write(buf[:requestSize])
 	if err != nil {
 		return v, err
 	}
 
+	n, err := sc.conn.Read(buf)
 	if buf[0] != globals.OK_STATUS_CODE {
 		var errMsg string
-		_ = sc.node.stringSerializer.Decode(buf[1:], &errMsg)
+		_ = sc.node.stringSerializer.Decode(buf[1:n], &errMsg)
 		return v, fmt.Errorf("call error: %s", errMsg)
 	}
 

@@ -140,17 +140,18 @@ func (s *Subscriber[K]) connect() error {
 	keyCode := s.serializer.Code()
 	n := copy(buf, keyCode)
 
-	n, err = write(conn, buf, n, true)
+	_, err = conn.Write(buf[:n])
 	if err != nil {
-		logger.Error("failed to validate service input type", "error", err)
+		logger.Error("failed to write into socket", "error", err)
 		return err
-	} else if n != 1 {
-		err = fmt.Errorf("response is corrupted")
-		logger.Error("failed to validate service input type", "error", err)
-		return err
+	}
+
+	_, err = conn.Read(buf)
+	if err != nil {
+		logger.Error("failed to read from socket", "error", err)
 	} else if buf[0] != globals.OK_STATUS_CODE {
-		err = fmt.Errorf("service data type is different")
-		logger.Error("failed to validate service input type", "error", err)
+		err = fmt.Errorf("publisher data type is different.")
+		logger.Error("failed to validate publisher input type", "error", err)
 		return err
 	}
 

@@ -106,7 +106,7 @@ func (p *Publisher[K]) run() {
 			for _, client := range snapClients {
 				wg.Add(1)
 				go func(target io.ReadWriteCloser) {
-					_, err := write(target, buf, payloadSize, false)
+					_, err := target.Write(buf[:payloadSize])
 					if err != nil {
 						select {
 						case p.deadClient <- target:

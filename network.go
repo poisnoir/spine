@@ -9,19 +9,6 @@ import (
 	"path/filepath"
 )
 
-// The buffer is coming from pool and it is big enoght
-// the response is gonna go to given buffer if exist
-func write(sess io.ReadWriteCloser, buf []byte, requestSize int, hasResponse bool) (int, error) {
-
-	_, err := sess.Write(buf[:requestSize])
-	if !hasResponse {
-		return 0, err
-	}
-
-	n, err := sess.Read(buf)
-	return n, err
-}
-
 func runListener(listener net.Listener, logger *slog.Logger, handler func(io.ReadWriteCloser)) {
 	for {
 		conn, err := listener.Accept()
