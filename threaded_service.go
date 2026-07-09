@@ -61,7 +61,8 @@ func (s *ThreadedService[K, V]) clientHandler(conn io.ReadWriteCloser) {
 	bufPtr := s.node.bufferPool.Get().(*[]byte)
 	defer s.node.bufferPool.Put(bufPtr)
 
-	handleCallerRequest(conn, s.keySerializer, s.valueSerializer, s.node.stringSerializer, *bufPtr, s.processRequest, logger)
+	// BUGFIX: dropped the nil stringSerializer arg — handleCallerRequest no longer takes one.
+	handleCallerRequest(conn, s.keySerializer, s.valueSerializer, *bufPtr, s.processRequest, logger)
 
 }
 

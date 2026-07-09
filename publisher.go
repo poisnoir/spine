@@ -93,7 +93,7 @@ func (p *Publisher[K]) run() {
 			tempData := p.lastData
 			p.lastDataMu.RUnlock()
 
-			payloadSize := p.serializer.GetRequiredSize(&tempData)
+			payloadSize := p.serializer.GetRequiredSize()
 			if payloadSize > globals.MAX_PACKET_SIZE {
 				p.logger.Error("payload size too big", "size", payloadSize)
 				continue

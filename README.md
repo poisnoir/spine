@@ -44,14 +44,15 @@ go test -bench=BenchmarkThreadedServiceCall
 
 ## 🛠 Getting Started
 
-### 1. Initialize a Namespace
+### 1. Create a Node
 All communication is isolated within a namespace.
 ```go
 ctx := context.Background()
 logger := slog.Default()
 
-// Joins a namespace. Automatically detects spined daemon.
-ns, err := spine.JointNamespace("robot_core", ctx, logger)
+// BUGFIX: README previously showed a nonexistent spine.JointNamespace(...) API.
+// The real entry point is CreateNode, which joins a namespace and auto-detects spined.
+node, err := spine.CreateNode("robot_core", "my_node", ctx, logger)
 ```
 
 ### 2. Services (RPC)
@@ -64,12 +65,12 @@ handler := func(input string) (int, error) {
 }
 
 // Register a standard service (sequential execution)
-service, _ := spine.NewService(ns, "compute_len", handler)
+service, _ := spine.NewService(node, "compute_len", handler)
 ```
 
 **Client:**
 ```go
-caller, _ := spine.NewServiceCaller[string, int](ns, "compute_len")
+caller, _ := spine.NewServiceCaller[string, int](node, "compute_len")
 
 // Type-safe call
 result, err := caller.Call("hello spine", context.Background())
@@ -78,13 +79,13 @@ result, err := caller.Call("hello spine", context.Background())
 ### 3. Pub/Sub (Asynchronous)
 **Publisher:**
 ```go
-pub, _ := spine.NewPublisher[SensorData](ns, "lidar")
+pub, _ := spine.NewPublisher[SensorData](node, "lidar")
 pub.Publish(data)
 ```
 
 **Subscriber:**
 ```go
-sub, _ := spine.NewSubscriber[SensorData](ns, "lidar")
+sub, _ := spine.NewSubscriber[SensorData](node, "lidar")
 
 // Polling for data
 data, err := sub.Get()

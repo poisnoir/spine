@@ -133,7 +133,10 @@ func (s *Subscriber[K]) connect() error {
 		"connect",
 	)
 
-	conn, err := net.Dial("unixpacket", "/tmp/spine/publisher/"+s.node.namespace+"/"+s.subscribedTo)
+	// BUGFIX: Publisher's listener (network.go/createListener) was migrated from
+	// "unixpacket" to "unix" but this dial was missed, so every Subscriber failed to
+	// connect with "protocol wrong type for socket" and retried forever, silently.
+	conn, err := net.Dial("unix", "/tmp/spine/publisher/"+s.node.namespace+"/"+s.subscribedTo)
 	if err != nil {
 		return err
 	}

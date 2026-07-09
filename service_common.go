@@ -41,7 +41,11 @@ func generateService[K any, V any](node *Node, name string) (*mad.Mad[K], *mad.M
 		return nil, nil, nil, err
 	}
 
-	return keyEnc, valueEnc, listener, nil
+	// BUGFIX: was a hardcoded 0, which only registered as the correct type (Service) by
+	// coincidence against spined's (now-fixed) entity type codes. Use the real constant.
+	err = node.registerToSpined(name, globals.SERVICE_TYPE)
+
+	return keyEnc, valueEnc, listener, err
 
 }
 
@@ -76,7 +80,10 @@ func establishConnection(conn io.ReadWriteCloser, keyCode []byte, valueCode []by
 	return err
 }
 
-func handleCallerRequest[K any, V any](conn io.ReadWriteCloser, keySerializer *mad.Mad[K], valueSerializer *mad.Mad[V], stringSerializer *mad.Mad[string], buf []byte, processRequest func(K) serviceOutput[V], logger *slog.Logger) {
+// BUGFIX: dropped the stringSerializer param. mad has no string/slice support, so
+// it was always passed as nil and crashed with a nil-pointer deref the first time
+// a handler returned an error (see the res.err branch below).
+func handleCallerRequest[K any, V any](conn io.ReadWriteCloser, keySerializer *mad.Mad[K], valueSerializer *mad.Mad[V], buf []byte, processRequest func(K) serviceOutput[V], logger *slog.Logger) {
 
 	defer conn.Close()
 	err := establishConnection(conn, []byte(keySerializer.Code()), []byte(valueSerializer.Code()), buf, logger)
@@ -102,20 +109,22 @@ func handleCallerRequest[K any, V any](conn io.ReadWriteCloser, keySerializer *m
 
 		res := processRequest(key)
 		if res.err != nil {
-			logger.Error("handler failed", "error", err)
-			errMsg := res.err.Error()
-			buf[0] = globals.ERROR_SERVICE_ERROR_CODE
-			stringSerializer.Encode(&errMsg, buf[1:])
-			_, err = conn.Write(buf[:stringSerializer.GetRequiredSize(&errMsg)+1])
+			// BUGFIX: this branch logged the wrong variable (err, which was nil/stale
+			// from the Decode above, instead of res.err), encoded the error message via
+			// a stringSerializer that was always nil (crash), and had no continue/return,
+			// so it fell through and wrote a second bogus OK response for the same request.
+			logger.Error("handler failed", "error", res.err)
+			_, err = conn.Write([]byte{globals.ERROR_SERVICE_ERROR_CODE})
 			if err != nil {
 				logger.Error("failed to write from connection", "error", err)
 				return
 			}
+			continue
 		}
 
 		buf[0] = globals.OK_STATUS_CODE
 		valueSerializer.Encode(&res.data, buf[1:])
-		_, err = conn.Write(buf[:valueSerializer.GetRequiredSize(&res.data)+1])
+		_, err = conn.Write(buf[:valueSerializer.GetRequiredSize()+1])
 		if err != nil {
 			logger.Error("failed to write from connection", "error", err)
 			return

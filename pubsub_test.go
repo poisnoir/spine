@@ -13,17 +13,26 @@ func TestPubSub_Basic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	node, err := CreateNode("test_pubsub", "node1", ctx, logger)
+	// BUGFIX: spined only accepts the "common" namespace today. These tests used to pass
+	// ad-hoc namespace names, which only "worked" because they silently fell back to
+	// local-only mode whenever spined wasn't reachable — the moment a real spined is
+	// running (as it was for parts of this session), every one of these calls would
+	// get silently rejected with INVALID_NAMESPACE and fail downstream in confusing ways.
+	node, err := CreateNode("common", "pubsub_basic_node", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	pub, err := NewPublisher[string](node, "updates")
+	// BUGFIX: was NewPublisher[string]/NewSubscriber[string] — mad has no string support
+	// anymore (removed along with slices/maps), so this failed with "unsupported type:
+	// string" the moment it got past the namespace fix above. uint32 exercises the same
+	// pub/sub path with a type mad actually supports.
+	pub, err := NewPublisher[uint32](node, "updates")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	sub, err := NewSubscriber[string](node, "updates")
+	sub, err := NewSubscriber[uint32](node, "updates")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +40,7 @@ func TestPubSub_Basic(t *testing.T) {
 
 	time.Sleep(time.Millisecond * 100)
 
-	expected := "hello subscribers"
+	expected := uint32(777)
 	pub.Publish(expected)
 
 	got, err := sub.Get()
@@ -40,7 +49,7 @@ func TestPubSub_Basic(t *testing.T) {
 	}
 
 	if got != expected {
-		t.Errorf("expected %q, got %q", expected, got)
+		t.Errorf("expected %d, got %d", expected, got)
 	}
 }
 
@@ -49,7 +58,7 @@ func TestPubSub_MultipleSubscribers(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	node, err := CreateNode("test_multi_pubsub", "node1", ctx, logger)
+	node, err := CreateNode("common", "pubsub_multi_node", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

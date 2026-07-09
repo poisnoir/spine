@@ -12,11 +12,17 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx := context.Background()
-	node, _ := spine.CreateNode("example", "service_caller_sample", ctx, logger)
+	node, err := spine.CreateNode("common", "service_caller_sample", ctx, logger)
+	if err != nil {
+		panic(err)
+	}
 
-	c, _ := spine.NewServiceCaller[string, string](node, "print")
+	c, err := spine.NewServiceCaller[uint32, uint32](node, "time_two")
+	if err != nil {
+		panic(err)
+	}
 
-	result, _ := c.Call("hello world", ctx)
+	result, _ := c.Call(2, ctx)
 	fmt.Println(result)
 
 	select {}

@@ -12,16 +12,24 @@ import (
 func TestService(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := CreateNode("test_service", "test", ctx, logger)
+	// BUGFIX: see pubsub_test.go — spined only accepts "common", and node names must be
+	// unique within a namespace, so every CreateNode below gets its own distinct name
+	// (they used to all pass "test", which would collide the moment a real spined saw
+	// more than one of these in the same namespace).
+	ns, err := CreateNode("common", "service_test_node", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	handler := func(input string) (string, error) {
-		if input == "error" {
-			return "", errors.New("intentional error")
+	// BUGFIX: handler/caller were func(string)(string,error) / NewServiceCaller[string,string]
+	// — mad has no string support anymore, so this failed with "unsupported type: string"
+	// once it got past the namespace fix above. Swapped to uint32, using 0 as the
+	// error-trigger sentinel in place of the "error" string sentinel.
+	handler := func(input uint32) (uint32, error) {
+		if input == 0 {
+			return 0, errors.New("intentional error")
 		}
-		return "hello " + input, nil
+		return input + 1, nil
 	}
 
 	_, err = NewService(ns, "greeter", handler)
@@ -29,7 +37,7 @@ func TestService(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	caller, err := NewServiceCaller[string, string](ns, "greeter")
+	caller, err := NewServiceCaller[uint32, uint32](ns, "greeter")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,16 +46,16 @@ func TestService(t *testing.T) {
 	// Test success case
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := caller.Call("world", ctx)
+	resp, err := caller.Call(41, ctx)
 	if err != nil {
 		t.Fatalf("call failed: %v", err)
 	}
-	if resp != "hello world" {
-		t.Errorf("expected 'hello world', got '%s'", resp)
+	if resp != 42 {
+		t.Errorf("expected 42, got %d", resp)
 	}
 
 	// Test error case
-	resp, err = caller.Call("error", ctx)
+	resp, err = caller.Call(0, ctx)
 	if err == nil {
 		t.Error("expected error, got nil")
 	}
@@ -56,7 +64,7 @@ func TestService(t *testing.T) {
 func TestThreadedService(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := CreateNode("test_threaded_service", "test", ctx, logger)
+	ns, err := CreateNode("common", "threaded_service_test_node", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,12 +73,14 @@ func TestThreadedService(t *testing.T) {
 		return input * 10, nil
 	}
 
-	_, err = NewThreadedService(ns, "math", handler)
+	// renamed from "math" — collided with service_benchmark_test.go's BenchmarkServiceCall
+	// once both run against the same "common" namespace.
+	_, err = NewThreadedService(ns, "threaded_math", handler)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	caller, err := NewServiceCaller[uint32, uint32](ns, "math")
+	caller, err := NewServiceCaller[uint32, uint32](ns, "threaded_math")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,12 +103,14 @@ func TestThreadedService(t *testing.T) {
 func TestServiceCaller_ContextCancel(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := CreateNode("test_cancel", "test", ctx, logger)
+	ns, err := CreateNode("common", "cancel_test_node", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	handler := func(input string) (string, error) {
+	// BUGFIX: was func(string)(string,error) / NewServiceCaller[string,string] — mad has
+	// no string support anymore. uint32 exercises the same slow-handler/timeout path.
+	handler := func(input uint32) (uint32, error) {
 		time.Sleep(2 * time.Second)
 		return input, nil
 	}
@@ -108,7 +120,7 @@ func TestServiceCaller_ContextCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	caller, err := NewServiceCaller[string, string](ns, "slow")
+	caller, err := NewServiceCaller[uint32, uint32](ns, "slow")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +129,7 @@ func TestServiceCaller_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, err = caller.Call("should_timeout", ctx)
+	_, err = caller.Call(1, ctx)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("expected DeadlineExceeded, got %v", err)
 	}
@@ -126,7 +138,7 @@ func TestServiceCaller_ContextCancel(t *testing.T) {
 func TestThreadedService_Parallel(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := CreateNode("test_parallel", "test", ctx, logger)
+	ns, err := CreateNode("common", "threaded_parallel_test_node", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

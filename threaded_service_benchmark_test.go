@@ -2,15 +2,21 @@ package spine
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 )
 
 func BenchmarkThreadedServiceCall(b *testing.B) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := CreateNode("bench_threaded", "test", ctx, logger)
+	// BUGFIX: see pubsub_benchmark_test.go — names must be unique per invocation, not
+	// just per function, since go test's benchmark harness re-runs this whole function
+	// (including setup) on every calibration pass.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	ns, err := CreateNode("common", "bench_threaded_node_"+suffix, ctx, logger)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -19,12 +25,12 @@ func BenchmarkThreadedServiceCall(b *testing.B) {
 		return input * 2, nil
 	}
 
-	_, err = NewThreadedService(ns, "math_threaded", handler)
+	_, err = NewThreadedService(ns, "math_threaded_"+suffix, handler)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	caller, err := NewServiceCaller[uint32, uint32](ns, "math_threaded")
+	caller, err := NewServiceCaller[uint32, uint32](ns, "math_threaded_"+suffix)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -41,7 +47,8 @@ func BenchmarkThreadedServiceCall(b *testing.B) {
 func BenchmarkThreadedServiceCallParallel(b *testing.B) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx := context.Background()
-	ns, err := CreateNode("bench_threaded_parallel", "test", ctx, logger)
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	ns, err := CreateNode("common", "bench_threaded_parallel_node_"+suffix, ctx, logger)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -50,12 +57,12 @@ func BenchmarkThreadedServiceCallParallel(b *testing.B) {
 		return input * 2, nil
 	}
 
-	_, err = NewThreadedService(ns, "math_threaded_parallel", handler)
+	_, err = NewThreadedService(ns, "math_threaded_parallel_"+suffix, handler)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	caller, err := NewServiceCaller[uint32, uint32](ns, "math_threaded_parallel")
+	caller, err := NewServiceCaller[uint32, uint32](ns, "math_threaded_parallel_"+suffix)
 	if err != nil {
 		b.Fatal(err)
 	}

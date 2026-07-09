@@ -99,7 +99,7 @@ func (sc *ServiceCaller[K, V]) run() {
 func (sc *ServiceCaller[K, V]) send(key K) (V, error) {
 	var v V
 
-	requestSize := sc.keySerializer.GetRequiredSize(&key)
+	requestSize := sc.keySerializer.GetRequiredSize()
 	if requestSize > globals.MAX_PACKET_SIZE {
 		return v, fmt.Errorf(globals.ERROR_PAYLOAD_SIZE)
 	}
@@ -116,11 +116,15 @@ func (sc *ServiceCaller[K, V]) send(key K) (V, error) {
 		return v, err
 	}
 
-	n, err := sc.conn.Read(buf)
+	_, err = sc.conn.Read(buf)
+	if err != nil {
+		return v, err
+	}
+
 	if buf[0] != globals.OK_STATUS_CODE {
-		var errMsg string
-		_ = sc.node.stringSerializer.Decode(buf[1:n], &errMsg)
-		return v, fmt.Errorf("call error: %s", errMsg)
+		// error messages can't be decoded here: mad has no string/slice support,
+		// so the service side only ever sends a bare status code, not a message.
+		return v, fmt.Errorf("call error: status %d", buf[0])
 	}
 
 	_ = sc.valueSerializer.Decode(buf[1:], &v)
@@ -171,7 +175,7 @@ func (sc *ServiceCaller[K, V]) connect() error {
 	)
 
 	// establishing connection
-	conn, err := net.Dial("unixpacket", "/tmp/spine/service/"+sc.node.namespace+"/"+sc.serviceName)
+	conn, err := net.Dial("unix", "/tmp/spine/service/"+sc.node.namespace+"/"+sc.serviceName)
 	if err != nil {
 		logger.Error("failed to dial service", "error", err)
 		return err
