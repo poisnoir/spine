@@ -1,7 +1,6 @@
 package spine
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net"
@@ -13,8 +12,6 @@ type ThreadedService[K any, V any] struct {
 	node *Node
 	name string
 
-	context  context.Context
-	cancel   context.CancelFunc
 	listener net.Listener
 
 	keySerializer   *mad.Mad[K]
@@ -23,6 +20,10 @@ type ThreadedService[K any, V any] struct {
 	handler func(K) (V, error)
 }
 
+// BUGFIX: dropped the unused context/cancel fields along with Close() — this
+// type never read its context anywhere (each request is handled synchronously
+// in its own per-connection goroutine, no ctx.Done() select), so they were
+// dead weight even before entity-level Close() was removed project-wide.
 func NewThreadedService[K any, V any](node *Node, name string, handler func(K) (V, error)) (*ThreadedService[K, V], error) {
 
 	keyEnc, valueEnc, listener, err := generateService[K, V](node, name)
@@ -30,14 +31,9 @@ func NewThreadedService[K any, V any](node *Node, name string, handler func(K) (
 		return nil, fmt.Errorf("failed to create service: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(node.ctx)
-
 	ts := &ThreadedService[K, V]{
 		node: node,
 		name: name,
-
-		context: ctx,
-		cancel:  cancel,
 
 		listener:        listener,
 		handler:         handler,
@@ -71,7 +67,3 @@ func (ts *ThreadedService[K, V]) processRequest(key K) serviceOutput[V] {
 	return serviceOutput[V]{data: result, err: err}
 }
 
-func (ts *ThreadedService[K, V]) Close() error {
-	ts.cancel()
-	return ts.listener.Close()
-}

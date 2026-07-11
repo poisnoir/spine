@@ -18,7 +18,6 @@ type Service[K any, V any] struct {
 
 	context  context.Context
 	listener net.Listener
-	cancel   context.CancelFunc
 
 	handler  func(K) (V, error)
 	requests chan serviceRequest[K, V]
@@ -30,8 +29,8 @@ func NewService[K any, V any](node *Node, name string, handler func(K) (V, error
 	if err != nil {
 		return nil, fmt.Errorf("failed to create service: %v", err)
 	}
-	ctx, cancel := context.WithCancel(node.ctx)
-
+	// BUGFIX: no more entity-level Close()/cancel — a service shares its node's
+	// context directly and lives as long as the node does, same as Publisher.
 	s := &Service[K, V]{
 		node: node,
 		name: name,
@@ -39,8 +38,7 @@ func NewService[K any, V any](node *Node, name string, handler func(K) (V, error
 		keySerializer:   keySer,
 		valueSerializer: valueSer,
 
-		context:  ctx,
-		cancel:   cancel,
+		context:  node.ctx,
 		listener: listener,
 
 		requests: make(chan serviceRequest[K, V], 100),
@@ -123,11 +121,6 @@ func (s *Service[K, V]) runHandler() {
 			return
 		}
 	}
-}
-
-func (s *Service[K, V]) Close() error {
-	s.cancel()
-	return s.listener.Close()
 }
 
 func (s *Service[K, V]) Name() string {

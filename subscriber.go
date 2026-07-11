@@ -17,7 +17,6 @@ type Subscriber[K any] struct {
 
 	conn        net.Conn
 	ctx         context.Context
-	cancel      context.CancelFunc
 	isConnected bool
 
 	mutex    sync.RWMutex
@@ -39,14 +38,16 @@ func NewSubscriber[K any](node *Node, topic string) (*Subscriber[K], error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(node.ctx)
-
 	sub := &Subscriber[K]{
 		node:         node,
 		subscribedTo: topic,
 
-		ctx:         ctx,
-		cancel:      cancel,
+		// BUGFIX: no more entity-level Close()/cancel — a subscriber now shares its
+		// node's context directly and lives as long as the node does. Cancel/close
+		// semantics for individual subscribers are coming back later, deliberately
+		// designed rather than bolted on (see node.ctx for the only thing that can
+		// currently stop this).
+		ctx:         node.ctx,
 		isConnected: false,
 
 		pushSig: make(chan struct{}, 1),
@@ -166,11 +167,6 @@ func (s *Subscriber[K]) connect() error {
 	s.conn = conn
 	s.isConnected = true
 
-	return nil
-}
-
-func (s *Subscriber[K]) Close() error {
-	s.cancel()
 	return nil
 }
 

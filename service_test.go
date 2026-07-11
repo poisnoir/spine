@@ -41,8 +41,6 @@ func TestService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer caller.Close()
-
 	// Test success case
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -84,8 +82,6 @@ func TestThreadedService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer caller.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -124,8 +120,6 @@ func TestServiceCaller_ContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer caller.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
@@ -157,8 +151,6 @@ func TestThreadedService_Parallel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer caller.Close()
-
 	const count = 20
 	errChan := make(chan error, count)
 

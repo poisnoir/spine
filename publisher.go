@@ -29,8 +29,7 @@ type Publisher[K any] struct {
 	lastDataMu sync.RWMutex
 	lastData   K
 
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx context.Context
 }
 
 func NewPublisher[K any](node *Node, name string) (*Publisher[K], error) {
@@ -51,8 +50,8 @@ func NewPublisher[K any](node *Node, name string) (*Publisher[K], error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(node.ctx)
-
+	// BUGFIX: no more entity-level Close()/cancel — a publisher shares its node's
+	// context directly and lives as long as the node does, same as Subscriber.
 	p := &Publisher[K]{
 		node:   node,
 		name:   name,
@@ -66,8 +65,7 @@ func NewPublisher[K any](node *Node, name string) (*Publisher[K], error) {
 
 		sendSig: make(chan struct{}, 1),
 
-		ctx:    ctx,
-		cancel: cancel,
+		ctx: node.ctx,
 	}
 
 	go runListener(listener, node.logger, p.registerSubscriber)
@@ -137,11 +135,6 @@ func (p *Publisher[K]) run() {
 			p.clientMu.Unlock()
 		}
 	}
-}
-
-func (p *Publisher[K]) Close() error {
-	p.cancel()
-	return p.listener.Close()
 }
 
 func (p *Publisher[K]) registerSubscriber(conn io.ReadWriteCloser) {

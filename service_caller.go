@@ -17,8 +17,7 @@ type ServiceCaller[K any, V any] struct {
 	keySerializer   *mad.Mad[K]
 	valueSerializer *mad.Mad[V]
 
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx context.Context
 
 	conn        net.Conn
 	requests    chan serviceRequest[K, V]
@@ -42,8 +41,9 @@ func NewServiceCaller[K any, V any](node *Node, serviceName string) (*ServiceCal
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(node.ctx)
-
+	// BUGFIX: no more entity-level Close()/cancel — a service caller shares its
+	// node's context directly and lives as long as the node does, same as
+	// Subscriber/Publisher/Service.
 	sc := &ServiceCaller[K, V]{
 		node:        node,
 		serviceName: serviceName,
@@ -51,8 +51,7 @@ func NewServiceCaller[K any, V any](node *Node, serviceName string) (*ServiceCal
 		keySerializer:   keySer,
 		valueSerializer: valueSer,
 
-		ctx:    ctx,
-		cancel: cancel,
+		ctx: node.ctx,
 
 		isConnected: false,
 		requests:    make(chan serviceRequest[K, V], 100),
@@ -158,11 +157,6 @@ func (sc *ServiceCaller[K, V]) Call(key K, ctx context.Context) (V, error) {
 	case output := <-data.output:
 		return output.data, output.err
 	}
-}
-
-func (sc *ServiceCaller[K, V]) Close() error {
-	sc.cancel()
-	return nil
 }
 
 func (sc *ServiceCaller[K, V]) connect() error {
