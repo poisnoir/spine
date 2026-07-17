@@ -60,10 +60,18 @@ jobs:
             git commit -m "chore: release v${{ steps.version.outputs.version }} [skip ci]"
           git push origin HEAD:main
 
+      # client-go/vX.Y.Z is not cosmetic: Go's module resolution requires a
+      # git tag prefixed with the subdirectory for a module that isn't at
+      # the repo root (https://go.dev/ref/mod#vcs-version) - without it,
+      # `go get github.com/poisnoir/spine-go/client-go@vX.Y.Z` fails with
+      # "unknown revision" even though the plain vX.Y.Z tag resolves fine
+      # for squid/spined/spine-uart/client-zig. Both tags point at the same
+      # commit; this is still one shared version number, just two refs to it.
       - name: Tag release
         run: |
           git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          git tag "client-go/v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}" "client-go/v${{ steps.version.outputs.version }}"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
