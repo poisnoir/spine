@@ -7,8 +7,8 @@ import (
 	"net"
 	"sync"
 
-	"github.com/poisnoir/spine-go/internal/mad"
-	"github.com/poisnoir/spine-go/internal/globals"
+	"github.com/poisnoir/spine-go/client-go/internal/mad"
+	"github.com/poisnoir/spine-go/client-go/internal/globals"
 )
 
 // Errors returned by CreateNode when spined rejects a node registration -

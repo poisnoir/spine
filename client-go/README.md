@@ -85,7 +85,7 @@ best for stateless, CPU- or I/O-bound handlers. Both speak the identical wire pr
 ## Installation
 
 ```bash
-go get github.com/poisnoir/spine-go
+go get github.com/poisnoir/spine-go/client-go
 ```
 
 Build/test from this directory (it's a separate Go module from the rest of the monorepo):

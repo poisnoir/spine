@@ -7,8 +7,8 @@ import (
 	"sync"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/poisnoir/spine-go/internal/mad"
-	"github.com/poisnoir/spine-go/internal/globals"
+	"github.com/poisnoir/spine-go/client-go/internal/mad"
+	"github.com/poisnoir/spine-go/client-go/internal/globals"
 )
 
 type Subscriber[K any] struct {

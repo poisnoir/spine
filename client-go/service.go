@@ -6,7 +6,7 @@ import (
 	"io"
 	"net"
 
-	"github.com/poisnoir/spine-go/internal/mad"
+	"github.com/poisnoir/spine-go/client-go/internal/mad"
 )
 
 type Service[K any, V any] struct {

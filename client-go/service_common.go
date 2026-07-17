@@ -8,8 +8,8 @@ import (
 	"net"
 	"slices"
 
-	"github.com/poisnoir/spine-go/internal/mad"
-	"github.com/poisnoir/spine-go/internal/globals"
+	"github.com/poisnoir/spine-go/client-go/internal/mad"
+	"github.com/poisnoir/spine-go/client-go/internal/globals"
 )
 
 // bunch of same operations in service and threaded service

@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/poisnoir/spine-go"
+	"github.com/poisnoir/spine-go/client-go"
 )
 
 func main() {

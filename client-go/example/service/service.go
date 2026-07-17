@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/poisnoir/spine-go"
+	"github.com/poisnoir/spine-go/client-go"
 )
 
 func main() {

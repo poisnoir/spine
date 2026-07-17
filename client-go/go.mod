@@ -1,5 +1,5 @@
 // module spine-go
-module github.com/poisnoir/spine-go
+module github.com/poisnoir/spine-go/client-go
 
 go 1.24.3
 

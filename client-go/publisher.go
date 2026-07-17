@@ -9,8 +9,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/poisnoir/spine-go/internal/mad"
-	"github.com/poisnoir/spine-go/internal/globals"
+	"github.com/poisnoir/spine-go/client-go/internal/mad"
+	"github.com/poisnoir/spine-go/client-go/internal/globals"
 )
 
 type Publisher[K any] struct {

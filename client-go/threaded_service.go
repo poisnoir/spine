@@ -5,7 +5,7 @@ import (
 	"io"
 	"net"
 
-	"github.com/poisnoir/spine-go/internal/mad"
+	"github.com/poisnoir/spine-go/client-go/internal/mad"
 )
 
 type ThreadedService[K any, V any] struct {
