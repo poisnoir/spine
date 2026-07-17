@@ -1,0 +1,15 @@
+# Zig
+.zig-cache/
+zig-out/
+
+# Go (client-go)
+client-go/*.test
+client-go/*.out
+
+# Editors / IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

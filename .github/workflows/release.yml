@@ -1,7 +1,10 @@
 name: Release
 
-# Runs only on a push directly to main (i.e. a merged PR, or a direct push).
-# One shared version for the whole repo - client-go and the Zig side
+# Runs on every push to main, but only bumps/tags/releases if the HEAD
+# commit's message contains "[release]" (case-insensitive) - e.g.
+# "add unregister rollback [release]". Tests still run on every push
+# regardless, so main stays continuously verified either way. One shared
+# version for the whole repo - client-go and the Zig side
 # (spined/squid/client-zig) are versioned and tagged together, matching the
 # existing single v0.1.0 tag from before the Go/Zig split.
 on:
@@ -19,9 +22,12 @@ jobs:
   release:
     name: Bump version and tag
     needs: test
+    if: contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -64,3 +70,44 @@ jobs:
         with:
           tag_name: "v${{ steps.version.outputs.version }}"
           generate_release_notes: true
+
+  build-binaries:
+    name: Build release binaries (${{ matrix.name }})
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - zig_target: x86_64-linux-gnu
+            name: linux-x86_64
+          - zig_target: aarch64-linux-gnu
+            name: linux-aarch64
+          - zig_target: x86_64-macos
+            name: macos-x86_64
+          - zig_target: aarch64-macos
+            name: macos-aarch64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: "v${{ needs.release.outputs.version }}"
+
+      - uses: mlugg/setup-zig@v2
+
+      # Zig cross-compiles natively (its own bundled libc/SDK headers, no
+      # target toolchain to install) - one Linux runner builds every
+      # platform, spined/squid/spine_uart/spine/spine_bench alike.
+      - run: zig build -Dtarget=${{ matrix.zig_target }} -Doptimize=ReleaseFast
+
+      - name: Package
+        run: |
+          tar_name="spine-v${{ needs.release.outputs.version }}-${{ matrix.name }}.tar.gz"
+          tar -czf "$tar_name" -C zig-out/bin .
+          echo "TARBALL=$tar_name" >> "$GITHUB_ENV"
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: "v${{ needs.release.outputs.version }}"
+          files: ${{ env.TARBALL }}
