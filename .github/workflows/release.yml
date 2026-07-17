@@ -33,7 +33,7 @@ jobs:
       # titled "reorder node registration to talk to spined first #minor".
       - name: Compute next version
         id: version
-        uses: paulhatch/semantic-version@v6
+        uses: paulhatch/semantic-version@v6.0.3
         with:
           tag_prefix: "v"
           major_pattern: "#major"
