@@ -1,8 +1,0 @@
-github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
-github.com/cenkalti/backoff/v4 v4.3.0/go.mod h1:Y3VNntkOUPxTVeUxJ/G5vcM//AlwfmyYozVcomhLiZE=
-github.com/poisnoir/mad-go v0.0.0-20260213164930-5bea82a451d0 h1:v/avcTie49/EO6WET76Hb0dPE8cXzqqjTfTEbodXe/4=
-github.com/poisnoir/mad-go v0.0.0-20260213164930-5bea82a451d0/go.mod h1:bfDyui5P/lsmOnU7IpFdG+azShUBZecByQp4fW1eUa4=
-github.com/poisnoir/mad-go v0.0.0-20260708162725-6361654abf6d h1:+x3fa0+lMrkflR80kfBLxnfRwF35wiUR+2bAeCP1iKA=
-github.com/poisnoir/mad-go v0.0.0-20260708162725-6361654abf6d/go.mod h1:bfDyui5P/lsmOnU7IpFdG+azShUBZecByQp4fW1eUa4=
-github.com/poisnoir/mad-go v0.0.0-20260708180857-d76d2f185f37 h1:BTN+7lEa5VJa8+pI7+9gBmcSfiV+g2OeQQEkE9PBuYY=
-github.com/poisnoir/mad-go v0.0.0-20260708180857-d76d2f185f37/go.mod h1:bfDyui5P/lsmOnU7IpFdG+azShUBZecByQp4fW1eUa4=

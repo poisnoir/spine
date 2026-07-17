@@ -1,110 +1,46 @@
-# Spine-Go
-### High-Performance, Hybrid Communication Middleware for Go
+# spine
 
-**Spine-Go** is a lightweight, local-first communication library designed for robotics, edge computing, and distributed systems. It provides a "zero-config" interface for **Services (RPC)** and **Pub/Sub** patterns, optimized for extreme performance on local machines while seamlessly scaling to LAN/WAN via the `spined` daemon.
+Monorepo for the spine control plane and its client libraries: `spined` (the
+per-machine registry daemon), `squid` (the CLI that talks to it), `spine-uart`
+(a supervised peer-bridge process for UART devices), and two wire-compatible
+node client libraries — `client-zig` and `client-go`.
 
-## 🚀 Key Philosophy: Hybrid Architecture
-Spine-Go employs a dual-path architecture to ensure you never sacrifice performance for connectivity:
-
-1.  **Local-First IPC**: When communicating on the same machine, Spine-Go uses **Unix Domain Sockets**, bypassing the network stack for ultra-low latency and maximum throughput.
-2.  **Daemon-Assisted Networking**: When a connection outside the machine is needed, Spine-Go handshakes with the `spined` daemon.
-
----
-
-## ✨ Features
-*   **Zero IDL Boilerplate**: No `.proto` or `.msg` files. Define your services and topics using native Go types and generics.
-*   **Compile-Time Type Safety**: Leverages Go 1.18+ generics to catch data mismatches before your code even runs.
-*   **Resilient Connectivity**: Built-in exponential backoff and automatic reconnection logic.
-*   **Hybrid Discovery**: Works in "Local-Only" mode without any external dependencies, or "Global" mode by connecting to the `spined` sidecar.
-
----
-
-## 📊 Performance Benchmarks
-To run the benchmarks and see how Spine-Go performs on your machine:
 ```
-# Run all benchmarks
-go test -bench=. -benchmem
-
-# Run specific service benchmarks
-go test -bench=BenchmarkServiceCall
-go test -bench=BenchmarkThreadedServiceCall
+spine/
+  protocol/           shared wire-protocol module: mad codec, string type,
+                      every command/status/entity-type code, and every
+                      payload struct (spined's single control socket, node/
+                      entity registration and unregistration, GetInfoResponse).
+  spined/             the daemon
+  squid/              the CLI
+  spine-uart/         standalone UART peer-bridge process (stub, see its own readme)
+  client-zig/         the Zig node client library, exported as the `spine` module
+  client-go/          the Go node client library, wire-compatible with client-zig
+  integration-tests/  spawns real spined/squid binaries and drives them with
+                      client-zig, over the actual Unix sockets
 ```
 
-*Tested on AMD Ryzen Threadripper PRO 5945WX on windows computer in wsl environment*
+- [spined/readme.md](spined/readme.md) — the registry daemon and wire protocol
+- [squid/README.md](squid/README.md) — the CLI: commands and flags
+- [client-zig/readme.md](client-zig/readme.md) — the Zig `spine` module
+- [client-go/README.md](client-go/README.md) — the Go `spine` module
 
-| Pattern | Throughput | Latency (ns/op) | Memory (B/op) | Allocs/op |
-| :--- | :--- | :--- | :--- | :--- |
-| **Pub/Sub** | ~70,000 msg/sec | 16,412 | 221 | 8 |
-| **Service Call (RPC)** | ~33,000 req/sec | 30,578 | 417 | 13 |
-| **Threaded Service** | ~27,000 req/sec | 32,909 | 271 | 9 |
+## Building
 
-> *Note: Benchmarks represent local IPC overhead including serialization. Actual network performance depends on the `spined` configuration.*
+The Zig components (`spined`, `squid`, `spine-uart`, `client-zig`, and the
+test suites) are built together from the repo root:
 
----
-
-## 🛠 Getting Started
-
-### 1. Create a Node
-All communication is isolated within a namespace.
-```go
-ctx := context.Background()
-logger := slog.Default()
-
-// BUGFIX: README previously showed a nonexistent spine.JointNamespace(...) API.
-// The real entry point is CreateNode, which joins a namespace and auto-detects spined.
-node, err := spine.CreateNode("robot_core", "my_node", ctx, logger)
+```sh
+zig build                    # produces zig-out/bin/{spined,squid,spine,spine_bench,spine_uart}
+zig build test               # protocol's mad.zig tests + spined's namespace tests +
+                              # client-zig's pubsub/service tests + compile-checks squid/spine-uart
+zig build test-integration   # spawns real spined/squid binaries and drives them with
+                              # client-zig, over the actual Unix sockets (needs `zig build` first)
+zig build run-spined
+zig build run-squid -- info
+zig build run-client-zig -- publish   # or subscribe | service | call | call-loop
+zig build bench                       # client-zig's pub/sub + service benchmarks
 ```
 
-### 2. Services (RPC)
-Turn any Go function into a network-discoverable service.
-
-**Server:**
-```go
-handler := func(input string) (int, error) {
-    return len(input), nil
-}
-
-// Register a standard service (sequential execution)
-service, _ := spine.NewService(node, "compute_len", handler)
-```
-
-**Client:**
-```go
-caller, _ := spine.NewServiceCaller[string, int](node, "compute_len")
-
-// Type-safe call
-result, err := caller.Call("hello spine", context.Background())
-```
-
-### 3. Pub/Sub (Asynchronous)
-**Publisher:**
-```go
-pub, _ := spine.NewPublisher[SensorData](node, "lidar")
-pub.Publish(data)
-```
-
-**Subscriber:**
-```go
-sub, _ := spine.NewSubscriber[SensorData](node, "lidar")
-
-// Polling for data
-data, err := sub.Get()
-```
-
----
-
-## 🔧 Service Types
-*   **Standard Service**: Processes requests sequentially. Best for handlers that modify shared state.
-*   **Threaded Service**: Processes requests in parallel. Best for stateless, CPU-intensive, or I/O-bound handlers.
-
----
-
-## 🏗 Installation
-```bash
-go get github.com/poisnoir/spine-go
-```
-
-*For cross-machine networking, ensure the `spined` daemon is running on your host.*
-
----
-**Built for the Go Edge & Robotics community.**
+`client-go` is a separate Go module (its own `go.mod`) — see
+[client-go/README.md](client-go/README.md) for building and testing it.

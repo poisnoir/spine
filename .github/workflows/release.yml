@@ -1,0 +1,66 @@
+name: Release
+
+# Runs only on a push directly to main (i.e. a merged PR, or a direct push).
+# One shared version for the whole repo - client-go and the Zig side
+# (spined/squid/client-zig) are versioned and tagged together, matching the
+# existing single v0.1.0 tag from before the Go/Zig split.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Bump version and tag
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history - semantic-version scans commits since the last tag
+          persist-credentials: true
+
+      # Defaults to a patch bump. Put #major or #minor anywhere in a commit
+      # message (since the last tag) to bump that instead - e.g. a commit
+      # titled "reorder node registration to talk to spined first #minor".
+      - name: Compute next version
+        id: version
+        uses: paulhatch/semantic-version@v6
+        with:
+          tag_prefix: "v"
+          major_pattern: "#major"
+          minor_pattern: "#minor"
+          version_format: "${major}.${minor}.${patch}"
+
+      - name: Sync build.zig.zon version
+        run: |
+          sed -i "s/\.version = \"[0-9][0-9.]*\"/.version = \"${{ steps.version.outputs.version }}\"/" build.zig.zon
+          grep '.version' build.zig.zon
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add build.zig.zon
+          git diff --cached --quiet && echo "build.zig.zon already at this version, nothing to commit" || \
+            git commit -m "chore: release v${{ steps.version.outputs.version }} [skip ci]"
+          git push origin HEAD:main
+
+      - name: Tag release
+        run: |
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: "v${{ steps.version.outputs.version }}"
+          generate_release_notes: true

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  # main is deliberately excluded here: release.yml triggers on push to main
+  # and calls this workflow itself (see the `test` job there), so a direct
+  # push trigger here too would just run the same test suite twice.
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-zig:
+    name: Zig (spined, squid, client-zig, protocol)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # version omitted on purpose - reads minimum_zig_version from
+      # build.zig.zon, so bumping the Zig version there is the only place
+      # that needs to change.
+      - uses: mlugg/setup-zig@v2
+
+      - run: zig build
+      - run: zig build test
+      # needs zig-out/bin/{spined,squid} from the install step above -
+      # test-integration also depends on the install step itself, but
+      # building explicitly first keeps failures easier to attribute.
+      - run: zig build test-integration
+
+  test-go:
+    name: Go (client-go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client-go
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: client-go/go.mod
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
