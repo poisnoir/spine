@@ -12,12 +12,21 @@ test {
 }
 
 pub fn main(init: std.process.Init) !void {
-    // Initialize Socketchild_allocator: Allocator
     const io = init.io;
-    const gpa = std.heap.page_allocator;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+
+    // Not an ArenaAllocator: spined is a long-running daemon that
+    // create()/destroy()s per-connection buffers and per-GetInfo response
+    // buffers for its entire lifetime, never resetting. An arena only ever
+    // grows its backing chunks and reclaims a `free`/`destroy` call solely
+    // when it happens to be the most recent allocation in the arena's
+    // current chunk (see std.heap.ArenaAllocator's doc comment) - under
+    // concurrent connections (handled via io.concurrent, so alloc/destroy
+    // pairs interleave and don't complete in the same order they started)
+    // that's effectively never true, so every connection's buffers and
+    // every GetInfoResponse leaked for good. smp_allocator is a real,
+    // thread-safe general-purpose allocator that reclaims every destroy()
+    // regardless of ordering, which is what a long-lived daemon needs.
+    const allocator = std.heap.smp_allocator;
     var s = try Spined.init(io, allocator);
     try s.run();
 }

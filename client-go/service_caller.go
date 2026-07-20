@@ -6,8 +6,8 @@ import (
 	"net"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/poisnoir/spine-go/client-go/internal/mad"
 	"github.com/poisnoir/spine-go/client-go/internal/globals"
+	"github.com/poisnoir/spine-go/client-go/internal/mad"
 )
 
 type ServiceCaller[K any, V any] struct {
@@ -77,7 +77,10 @@ func (sc *ServiceCaller[K, V]) run() {
 		case requestData := <-sc.requests:
 			if !sc.isConnected {
 				bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), sc.ctx)
-				_ = backoff.Retry(sc.connect, bo)
+				if err := backoff.Retry(sc.connect, bo); err != nil {
+					requestData.output <- serviceOutput[V]{err: err}
+					continue
+				}
 			}
 
 			if err := requestData.ctx.Err(); err != nil {

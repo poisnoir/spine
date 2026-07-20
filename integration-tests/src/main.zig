@@ -17,6 +17,8 @@ const print = std.debug.print;
 const spine = @import("spine");
 const protocol = @import("protocol");
 const globals = protocol.globals;
+const mad = protocol.mad;
+const net = std.Io.net;
 
 const spined_bin = "zig-out/bin/spined";
 
@@ -275,4 +277,177 @@ test "spined + spine client-lib: addNamespace rejects a duplicate namespace" {
         error.NamespaceAlreadyRegistered,
         spine.addNamespace(io, "dup_client_lib_test_ns"),
     );
+}
+
+// Reads VmRSS out of /proc/<pid>/status, in kB. Linux-only (matches the rest
+// of this project - SPINED_PATH etc. are all Unix-domain-socket-only
+// already), but this is the only reliable way to observe a *running*
+// process's current resident memory from the outside; std.process.Child's
+// ResourceUsageStatistics is only populated after wait()/kill(), which is
+// too late for a before/after comparison.
+//
+// BUGFIX: Dir.readFileAlloc (and File.readStreaming) return an empty read
+// for /proc files on this Io backend - both size their transfer off the
+// file's reported stat() size, which procfs reports as 0 for its virtual
+// files regardless of actual content. File.readPositional doesn't consult
+// that size at all (it's a bare pread), so looping it until it returns 0
+// reads the real content - the standard workaround for this well-known
+// procfs gotcha.
+fn getRssKb(io: std.Io, pid: std.process.Child.Id) !usize {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{pid});
+
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+
+    var buf: [16 * 1024]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        var vecs: [1][]u8 = .{buf[total..]};
+        const n = try file.readPositional(io, &vecs, total);
+        if (n == 0) break;
+        total += n;
+    }
+    const content = buf[0..total];
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "VmRSS:")) continue;
+        var it = std.mem.tokenizeAny(u8, line["VmRSS:".len..], " \t");
+        const num_str = it.next() orelse return error.VmRSSParseFailed;
+        return try std.fmt.parseInt(usize, num_str, 10);
+    }
+    return error.VmRSSNotFound;
+}
+
+fn getInfoRoundTrip(io: std.Io, response_buf: []u8) !void {
+    const addr = try net.UnixAddress.init(globals.SPINED_PATH);
+    const conn = try addr.connect(io);
+    defer conn.close(io);
+
+    var w_buf: [8]u8 = undefined;
+    var w = conn.writer(io, &w_buf);
+    try w.interface.writeInt(u8, globals.GET_INFO_CODE, .big);
+    try w.interface.flush();
+
+    // A large-ish reader buffer, not the 256 bytes node.zig's own getInfo()
+    // uses for the same call: that's fine for a single one-off request, but
+    // here it turned a ~271KB response into ~1000 tiny read syscalls per
+    // connection, holding each connection open far longer than a real
+    // client would - which inflated realized concurrency (more connections
+    // genuinely in flight at once) and, through smp_allocator's per-active-
+    // thread caching, apparent RSS, well past what real traffic causes.
+    var r_buf: [8192]u8 = undefined;
+    var r = conn.reader(io, &r_buf);
+    try r.interface.readSliceAll(response_buf);
+}
+
+fn getInfoWorker(io: std.Io, response_buf: []u8, iterations: usize, successes: *std.atomic.Value(usize)) void {
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        getInfoRoundTrip(io, response_buf) catch continue;
+        _ = successes.fetchAdd(1, .monotonic);
+    }
+}
+
+// Fires `worker_count` concurrent workers, each doing `iterations_per_worker`
+// sequential GetInfo round trips, and returns spined's RSS (in kB) once
+// they've all finished.
+fn runGetInfoBatch(io: std.Io, allocator: std.mem.Allocator, pid: std.process.Child.Id, worker_count: usize, iterations_per_worker: usize) !usize {
+    const response_size = mad.getRequiredSize(protocol.payloads.GetInfoResponse);
+
+    var successes: std.atomic.Value(usize) = .init(0);
+    var group: std.Io.Group = .init;
+    var w: usize = 0;
+    while (w < worker_count) : (w += 1) {
+        const response_buf = try allocator.alloc(u8, response_size);
+        try group.concurrent(io, getInfoWorker, .{ io, response_buf, iterations_per_worker, &successes });
+    }
+    try group.await(io);
+
+    // Sanity check this batch actually exercised spined rather than
+    // silently failing every request and passing by accident.
+    const total_requests = worker_count * iterations_per_worker;
+    try testing.expect(successes.load(.monotonic) > total_requests / 2);
+
+    return getRssKb(io, pid);
+}
+
+// Regression test for a real bug: spined used to wrap its entire lifetime in
+// a single std.heap.ArenaAllocator (spined/src/main.zig). ArenaAllocator
+// only ever reclaims a destroy()/free() call when it happens to be the most
+// recent allocation in the arena's current backing chunk - under concurrent
+// connections (spined dispatches each one via io.concurrent, so alloc/
+// destroy pairs interleave and don't complete in allocation order) that's
+// effectively never true, so every connection's r_buf/w_buf and every
+// ~270KB GetInfoResponse leaked for good. Reproduced live before the fix:
+// RSS went from 7.6MB to 3.3GB after 6000 concurrent GetInfo round trips.
+// Fixed by switching spined's allocator to std.heap.smp_allocator, a real
+// thread-safe general-purpose allocator that reclaims regardless of order.
+//
+// Concurrency matters here, not just request count: a purely sequential
+// burst of GetInfo calls barely grew RSS even against the old, buggy
+// allocator (verified separately) - only genuinely interleaved, concurrent
+// connections reproduce the leak, matching how spined actually serves
+// traffic in practice.
+//
+// This asserts *convergence* across repeated batches rather than one
+// absolute RSS ceiling. smp_allocator caches memory per active thread and
+// isn't eager to return it to the OS, so even the fixed, non-leaking
+// allocator legitimately grows RSS well past any small fixed threshold on
+// the very first batch under enough concurrency (verified: >100MB on a
+// first batch alone at this worker count) - an absolute bound calibrated to
+// look "safe" on one run is just a flaky test waiting to happen on
+// different hardware/scheduling. What the old, genuinely-leaking arena
+// could never do is *plateau*: each batch leaked a roughly constant amount
+// more, forever. So this runs several batches against the same spined
+// process and requires each later batch's growth to be markedly smaller
+// than the first batch's - the actual signature of "warmed up and done
+// growing" vs. "leaking a little more every time."
+test "spined: repeated concurrent GetInfo batches plateau instead of leaking" {
+    const io = testIo();
+    const allocator = testAllocator();
+
+    var child = try spawnSpined(io);
+    defer child.kill(io);
+    try waitForSpinedReady(io);
+
+    const pid = child.id orelse return error.SpinedHasNoPid;
+
+    // Let RSS settle right after startup before taking the baseline.
+    try io.sleep(std.Io.Duration.fromMilliseconds(100), .awake);
+    const baseline_kb = try getRssKb(io, pid);
+
+    const worker_count = 40;
+    const iterations_per_worker = 75; // 3000 requests per batch, concurrently interleaved
+    const batch_count = 4;
+
+    var prev_kb = baseline_kb;
+    var first_growth_kb: usize = 0;
+    var last_growth_kb: usize = 0;
+
+    var batch: usize = 0;
+    while (batch < batch_count) : (batch += 1) {
+        const after_kb = try runGetInfoBatch(io, allocator, pid, worker_count, iterations_per_worker);
+        const growth_kb = if (after_kb > prev_kb) after_kb - prev_kb else 0;
+        print("batch {d}: spined RSS {d}KB -> {d}KB (+{d}KB)\n", .{ batch, prev_kb, after_kb, growth_kb });
+
+        if (batch == 0) first_growth_kb = growth_kb;
+        last_growth_kb = growth_kb;
+        prev_kb = after_kb;
+    }
+
+    // The old, leaking arena grew by a roughly constant amount every batch
+    // (no plateau, ever) - the fixed allocator's later batches should cost
+    // only a small fraction of the first batch's one-time warm-up growth.
+    // Guard against divide-by-zero if the first batch happened to cost
+    // nothing at all (would only make the bound below stricter, not wrong).
+    const plateau_ceiling_kb = @max(first_growth_kb / 4, 5 * 1024);
+    if (last_growth_kb >= plateau_ceiling_kb) {
+        print(
+            "growth did not plateau: batch 0 grew {d}KB, batch {d} still grew {d}KB (ceiling {d}KB)\n",
+            .{ first_growth_kb, batch_count - 1, last_growth_kb, plateau_ceiling_kb },
+        );
+    }
+    try testing.expect(last_growth_kb < plateau_ceiling_kb);
 }

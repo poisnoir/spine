@@ -7,8 +7,8 @@ import (
 	"sync"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/poisnoir/spine-go/client-go/internal/mad"
 	"github.com/poisnoir/spine-go/client-go/internal/globals"
+	"github.com/poisnoir/spine-go/client-go/internal/mad"
 )
 
 type Subscriber[K any] struct {
@@ -159,6 +159,7 @@ func (s *Subscriber[K]) connect() error {
 	_, err = conn.Read(buf)
 	if err != nil {
 		logger.Error("failed to read from socket", "error", err)
+		return err
 	} else if buf[0] != globals.OK_STATUS_CODE {
 		err = fmt.Errorf("publisher data type is different.")
 		logger.Error("failed to validate publisher input type", "error", err)
