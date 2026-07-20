@@ -52,6 +52,13 @@ func newSpinedString(s string) spineString {
 	return ss
 }
 
+// The inverse of newSpinedString - decodes a spineString read off the wire
+// (e.g. inside a GetInfoResponse) back into a normal Go string. Used by
+// namespace.go's GetInfo to build its public, idiomatic Info tree.
+func (ss spineString) String() string {
+	return string(ss.data[:ss.len])
+}
+
 // Mirrors protocol/src/payloads.zig's MadType - field names matter for wire
 // compatibility here (mad sorts fields alphabetically by name on both
 // sides, with no field names transmitted, so Go's sort order has to land on

@@ -13,6 +13,25 @@ const OK_STATUS_CODE uint8 = 0
 // node registering itself (RegisterNodePayload follows).
 const REGISTER_NODE_CODE uint8 = 6
 
+// squid's own one-shot control commands on that same socket - mirrors
+// protocol/src/globals.zig's ADD_NAMESPACE_CODE/GET_INFO_CODE exactly.
+// Exposed here so Node.AddNamespace/Node.GetInfo (namespace.go) can perform
+// the same two operations squid's CLI does, as library calls.
+const ADD_NAMESPACE_CODE uint8 = 0
+const GET_INFO_CODE uint8 = 4
+
+// squid control-command responses - mirrors protocol/src/globals.zig's
+// TOO_MANY_NAMESPACES/NAMESPACE_ALREADY_REGISTERED.
+const TOO_MANY_NAMESPACES uint8 = 240
+const NAMESPACE_ALREADY_REGISTERED uint8 = 241
+
+// GetInfoResponse array bounds - mirrors protocol/src/globals.zig's
+// MAX_NAMESPACES/MAX_NODES exactly. Fixed at compile time since mad has no
+// dynamic-length encoding; a mismatch here against spined's own compiled-in
+// value would silently misdecode the response, not fail loudly.
+const MAX_NAMESPACES = 32
+const MAX_NODES = 256
+
 // Entity-registration operation codes: the first byte of each registration
 // message, telling spined which of RegisterPublisherPayload/
 // RegisterServicePayload/RegisterConsumerPayload follows. Mirrors

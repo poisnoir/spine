@@ -56,6 +56,22 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(spine_uart_exe);
 
+    // spine_tcp: standalone peer-bridge process for a TCP link to another
+    // machine, same stub/supervised-subprocess role as spine_uart above but
+    // for spined's still-missing cross-machine transport (see spined/readme.md's
+    // Limitations: "Local machine only"). Takes no imports yet: it doesn't
+    // register with spined or client-zig as a node yet, just validates its
+    // own argv (connect <ip-addr> | listen <port>).
+    const spine_tcp_exe = b.addExecutable(.{
+        .name = "spine_tcp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("spine-tcp/src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(spine_tcp_exe);
+
     // client-zig: the node client library. Its own module is exposed as
     // "spine" (so consumers write `@import("spine")`) and sits on top of
     // protocol the same way spined/squid do.
@@ -117,6 +133,14 @@ pub fn build(b: *std.Build) void {
         run_spine_uart_cmd.addArgs(args);
     }
 
+    const run_spine_tcp_step = b.step("run-spine-tcp", "Run spine_tcp -- connect <ip-addr> | listen <port>");
+    const run_spine_tcp_cmd = b.addRunArtifact(spine_tcp_exe);
+    run_spine_tcp_step.dependOn(&run_spine_tcp_cmd.step);
+    run_spine_tcp_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_spine_tcp_cmd.addArgs(args);
+    }
+
     const run_client_zig_step = b.step("run-client-zig", "Run the spine client-zig demo (publish/subscribe/service/call)");
     const run_client_zig_cmd = b.addRunArtifact(client_zig_exe);
     run_client_zig_step.dependOn(&run_client_zig_cmd.step);
@@ -149,6 +173,9 @@ pub fn build(b: *std.Build) void {
     const spine_uart_tests = b.addTest(.{ .root_module = spine_uart_exe.root_module });
     const run_spine_uart_tests = b.addRunArtifact(spine_uart_tests);
 
+    const spine_tcp_tests = b.addTest(.{ .root_module = spine_tcp_exe.root_module });
+    const run_spine_tcp_tests = b.addRunArtifact(spine_tcp_tests);
+
     const client_zig_tests = b.addTest(.{ .root_module = spine });
     const run_client_zig_tests = b.addRunArtifact(client_zig_tests);
 
@@ -157,6 +184,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_spined_tests.step);
     test_step.dependOn(&run_squid_tests.step);
     test_step.dependOn(&run_spine_uart_tests.step);
+    test_step.dependOn(&run_spine_tcp_tests.step);
     test_step.dependOn(&run_client_zig_tests.step);
 
     // Separate from `test`: these spawn the real spined/squid binaries as

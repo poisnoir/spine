@@ -25,6 +25,15 @@ pub const EntityRegisterError = error{
     UnexpectedStatus,
 };
 
+// Errors returned by addNamespace - mirrors squid's own `add namespace`
+// command (squid/src/main.zig's addNamespace), just as a library call
+// instead of a separate CLI invocation.
+pub const NamespaceError = error{
+    NamespaceAlreadyRegistered,
+    TooManyNamespaces,
+    UnexpectedStatus,
+};
+
 pub const Node = struct {
     namespace: []const u8,
     name: []const u8,
@@ -249,6 +258,63 @@ pub const Node = struct {
         return c;
     }
 };
+
+// Creates a namespace on spined - exposed here as a library call.
+pub fn addNamespace(io: std.Io, name: []const u8) !void {
+    const addr = try net.UnixAddress.init(protocol.globals.SPINED_PATH);
+    const conn = try addr.connect(io);
+    defer conn.close(io);
+
+    var w_buf: [256]u8 = undefined;
+    var r_buf: [8]u8 = undefined;
+    var w = conn.writer(io, &w_buf);
+    var r = conn.reader(io, &r_buf);
+
+    try w.interface.writeInt(u8, protocol.globals.ADD_NAMESPACE_CODE, .big);
+
+    const payload = protocol.payloads.CreateNamespacePayload{ .name = try string.fromConst(name) };
+    const size = mad.getRequiredSize(protocol.payloads.CreateNamespacePayload);
+    var msg_buf: [256]u8 = undefined;
+    _ = mad.encode(protocol.payloads.CreateNamespacePayload, payload, msg_buf[0..size]);
+
+    try w.interface.writeAll(msg_buf[0..size]);
+    try w.interface.flush();
+
+    const status = try r.interface.takeInt(u8, .big);
+    return switch (status) {
+        protocol.globals.OK_STATUS => {},
+        protocol.globals.NAMESPACE_ALREADY_REGISTERED => NamespaceError.NamespaceAlreadyRegistered,
+        protocol.globals.TOO_MANY_NAMESPACES => NamespaceError.TooManyNamespaces,
+        else => NamespaceError.UnexpectedStatus,
+    };
+}
+
+// Fetches every namespace/node spined currently knows about
+// GetInfoResponse is ~270KB fully populated (see spined.zig's
+// handle_get_info), so it's heap-allocated via `allocator` rather than
+// returned by value.
+pub fn getInfo(io: std.Io, allocator: std.mem.Allocator) !*protocol.payloads.GetInfoResponse {
+    const addr = try net.UnixAddress.init(protocol.globals.SPINED_PATH);
+    const conn = try addr.connect(io);
+    defer conn.close(io);
+
+    var w_buf: [8]u8 = undefined;
+    var w = conn.writer(io, &w_buf);
+    try w.interface.writeInt(u8, protocol.globals.GET_INFO_CODE, .big);
+    try w.interface.flush();
+
+    const size = mad.getRequiredSize(protocol.payloads.GetInfoResponse);
+    const raw = try allocator.alloc(u8, size);
+    defer allocator.free(raw);
+
+    var r_buf: [256]u8 = undefined;
+    var r = conn.reader(io, &r_buf);
+    try r.interface.readSliceAll(raw);
+
+    const info = try allocator.create(protocol.payloads.GetInfoResponse);
+    _ = mad.decode(protocol.payloads.GetInfoResponse, info, raw);
+    return info;
+}
 
 fn localOnly(namespace: []const u8, name: []const u8, io: std.Io, allocator: std.mem.Allocator) Node {
     return .{

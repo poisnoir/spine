@@ -243,6 +243,65 @@ test "spined + squid: adding a namespace shows up in squid info" {
     try testing.expect(std.mem.indexOf(u8, info.stderr, "integration_test_ns") != null);
 }
 
+test "spined + spine client-lib: addNamespace shows up in getInfo" {
+    const io = testIo();
+    const allocator = testAllocator();
+
+    var child = try spawnSpined(io);
+    defer child.kill(io);
+
+    // addNamespace/getInfo are free functions, not Node methods - they
+    // aren't scoped to any particular node - but registering a node here
+    // too lets this test also prove getInfo picks it up under "common".
+    var node = try waitForRegisteredNode(io, allocator, "common", "add_namespace_test_node");
+    defer node.deinit();
+
+    try spine.addNamespace(io, "client_lib_test_ns");
+
+    const info = try spine.getInfo(io, allocator);
+    defer allocator.destroy(info);
+
+    var found = false;
+    for (0..info.namespace_num) |i| {
+        const ns = &info.namespaces[i];
+        if (std.mem.eql(u8, ns.name.data[0..ns.name.len], "client_lib_test_ns")) {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+
+    // The node registered above must also show up under "common", proving
+    // getInfo() decoded the whole tree, not just the namespace it created.
+    var found_node = false;
+    for (0..info.namespace_num) |i| {
+        const ns = &info.namespaces[i];
+        if (!std.mem.eql(u8, ns.name.data[0..ns.name.len], "common")) continue;
+        for (0..ns.node_num) |j| {
+            const n = &ns.nodes[j];
+            if (std.mem.eql(u8, n.name.data[0..n.name.len], "add_namespace_test_node")) {
+                found_node = true;
+                break;
+            }
+        }
+    }
+    try testing.expect(found_node);
+}
+
+test "spined + spine client-lib: addNamespace rejects a duplicate namespace" {
+    const io = testIo();
+
+    var child = try spawnSpined(io);
+    defer child.kill(io);
+    try waitForSpinedReady(io);
+
+    try spine.addNamespace(io, "dup_client_lib_test_ns");
+    try testing.expectError(
+        error.NamespaceAlreadyRegistered,
+        spine.addNamespace(io, "dup_client_lib_test_ns"),
+    );
+}
+
 test "spined + squid: registering the same namespace twice is rejected" {
     const io = testIo();
     const allocator = testAllocator();
