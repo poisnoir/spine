@@ -312,7 +312,7 @@ pub const Namespace = struct {
     }
 
     fn cleanNode(ns: *@This(), node_id: usize, io: std.Io) void {
-        ns.lock.lock(io) catch unreachable;
+        ns.lock.lockUncancelable(io);
         defer ns.lock.unlock(io);
 
         // Lookup node
@@ -445,4 +445,60 @@ test "removeConsumer removes a matching consumer scoped by node_id and producer_
 
     ns.removeConsumer(1, &wanted, false);
     try testing.expectEqual(@as(u32, 0), ns.entities_num);
+}
+
+// Regression test for a real crash: cleanNode used to do
+// `ns.lock.lock(io) catch unreachable` - the `defer`-only call site made
+// the original author assume lock() "can't fail" here, but lock()'s
+// contended path (io.futexWait) is a genuine cancellation point. Verified
+// live before the fix: a task blocked in cleanNode on a contended ns.lock,
+// when its surrounding Io.Group was cancelled, panicked with "attempt to
+// unwrap error: Canceled" at exactly that line. Fixed by switching to
+// lockUncancelable, which absorbs cancellation instead of surfacing it -
+// exactly what cleanup code invoked from a defer (which can't propagate an
+// error anyway) needs.
+//
+// Reproduces the same shape directly against the real Namespace.cleanNode:
+// one task holds ns.lock, a second task calls cleanNode (which must block,
+// contended) via a Group, then that Group is cancelled while cleanNode is
+// still waiting. Pre-fix this panicked the whole test process; post-fix
+// cleanNode simply returns without having done its cleanup, same as any
+// other cancelled task would.
+test "cleanNode does not panic when cancelled while blocked on a contended lock" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ns = Namespace{};
+    ns.name = try string.fromConst("common");
+    ns.nodes[0] = .{ .name = try string.fromConst("held_by_other_task"), .id = 42 };
+    ns.node_num = 1;
+
+    const Holder = struct {
+        fn run(namespace: *Namespace, io_: std.Io, ready: *std.Io.Event) void {
+            namespace.lock.lock(io_) catch unreachable; // uncontended, fine
+            ready.set(io_);
+            io_.sleep(std.Io.Duration.fromMilliseconds(300), .awake) catch {};
+            namespace.lock.unlock(io_);
+        }
+    };
+
+    var ready: std.Io.Event = .unset;
+    var holder = io.async(Holder.run, .{ &ns, io, &ready });
+    defer holder.await(io);
+
+    ready.wait(io) catch {};
+
+    var group: std.Io.Group = .init;
+    // cleanNode is void, not error-returning, so it's a direct match for
+    // Group.concurrent's expected signature - no wrapper needed.
+    try group.concurrent(io, Namespace.cleanNode, .{ &ns, 42, io });
+    try io.sleep(std.Io.Duration.fromMilliseconds(50), .awake); // let it become contended
+
+    group.cancel(io); // this used to panic the whole process
+
+    // If we get here, the fix held. Whether cleanNode finished its cleanup
+    // before being cancelled or not isn't the point of this test (either
+    // is a legitimate outcome of racing a cancellation against a lock
+    // acquisition) - not panicking is.
 }

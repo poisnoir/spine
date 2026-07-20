@@ -3,25 +3,44 @@ package spine
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/poisnoir/spine-go/client-go/internal/globals"
 	"github.com/poisnoir/spine-go/client-go/internal/mad"
+	"github.com/poisnoir/spine-go/client-go/internal/globals"
 )
+
+// subscriberQueueCapacity bounds how many decoded-but-not-yet-Get()'d values
+// a Subscriber holds onto. Once full, the oldest unread value is dropped to
+// make room for the newest one - see Subscriber.push. A fixed constant
+// rather than a NewSubscriber parameter: keeps the existing signature and
+// every call site (examples, tests, benchmarks) unchanged; revisit as a
+// per-Subscriber option later if a single default stops being enough.
+const subscriberQueueCapacity = 32
 
 type Subscriber[K any] struct {
 	node         *Node
 	subscribedTo string
 
-	conn        net.Conn
-	ctx         context.Context
-	isConnected bool
+	ctx context.Context
 
-	mutex    sync.RWMutex
-	lastData K
-	pushSig  chan struct{}
+	// conn is only ever touched by run() - the single background goroutine
+	// that owns the connection for this Subscriber's whole lifetime - so it
+	// needs no lock of its own.
+	conn net.Conn
+
+	// Bounded ring buffer of decoded values not yet returned by Get().
+	// run() is the sole producer; Get() is the (possibly concurrent)
+	// consumer. queueCond signals "the queue became non-empty, or ctx was
+	// cancelled" - Get() re-checks ctx.Err() after waking since either can
+	// be why it woke up.
+	queueMu   sync.Mutex
+	queueCond *sync.Cond
+	queue     []K
+	head      int
+	count     int
 
 	serializer *mad.Mad[K]
 }
@@ -42,88 +61,127 @@ func NewSubscriber[K any](node *Node, topic string) (*Subscriber[K], error) {
 	sub := &Subscriber[K]{
 		node:         node,
 		subscribedTo: topic,
+		ctx:          node.ctx,
+		queue:        make([]K, subscriberQueueCapacity),
+		serializer:   decoder,
+	}
+	sub.queueCond = sync.NewCond(&sub.queueMu)
 
-		// BUGFIX: no more entity-level Close()/cancel — a subscriber now shares its
-		// node's context directly and lives as long as the node does. Cancel/close
-		// semantics for individual subscribers are coming back later, deliberately
-		// designed rather than bolted on (see node.ctx for the only thing that can
-		// currently stop this).
-		ctx:         node.ctx,
-		isConnected: false,
-
-		pushSig: make(chan struct{}, 1),
-
-		serializer: decoder,
+	// Mirrors client-zig's Node.subscribe(), which calls Subscriber.connect()
+	// synchronously before returning - blocks (unlimited backoff) until a
+	// publisher actually exists, rather than handing back a Subscriber that
+	// might not be connected yet and hoping something notices later. This
+	// also closes a previously-documented gap: since there's now a real
+	// synchronous failure point, a failed connect can roll back the
+	// registration above, the same way NewPublisher/NewService already do.
+	bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), sub.ctx)
+	if err := backoff.Retry(sub.connect, bo); err != nil {
+		node.unregisterConsumer(topic, false)
+		return nil, err
 	}
 
 	go sub.run()
+	go func() {
+		<-sub.ctx.Done()
+		sub.queueMu.Lock()
+		sub.queueCond.Broadcast() // wake any Get() blocked waiting for data - it'll see ctx.Err() and return
+		sub.queueMu.Unlock()
+	}()
+
 	return sub, nil
 }
 
-func (s *Subscriber[K]) Get() (K, error) {
-	var zero K
-	select {
-	case <-s.ctx.Done():
-		return zero, s.ctx.Err()
-	case <-s.pushSig:
-		s.mutex.RLock()
-		snap := s.lastData
-		s.mutex.RUnlock()
-		return snap, nil
-	}
-}
-
+// run reads every published value off the wire as soon as it arrives,
+// independently of how fast (or slow) callers of Get() drain them, and
+// keeps the most recent subscriberQueueCapacity of them - see push.
+//
+// This is a deliberate divergence from client-zig's Subscriber.next()
+// (which has no buffering at all and instead applies backpressure straight
+// through to the publisher once a subscriber falls behind): here, a
+// subscriber slower than its publisher drops its own oldest unread values
+// instead of ever stalling the publisher or other subscribers of the same
+// topic. That tradeoff (staleness over completeness, and over ever
+// blocking the sender) was chosen deliberately for this client, not an
+// oversight - see subscriber_test.go for the two scenarios it's verified
+// against.
 func (s *Subscriber[K]) run() {
-
 	bufPtr := s.node.bufferPool.Get().(*[]byte)
 	defer s.node.bufferPool.Put(bufPtr)
 	buf := *bufPtr
-
-	var data K
+	payloadSize := s.serializer.GetRequiredSize()
 
 	for {
-		select {
-		case <-s.ctx.Done():
-			if s.conn != nil {
-				s.conn.Close()
-			}
+		if s.ctx.Err() != nil {
 			return
-		default:
-			if !s.isConnected {
-				bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), s.ctx)
-				err := backoff.Retry(s.connect, bo)
-				if err != nil {
-					return
-				}
-				continue
-			}
-
-			n, err := s.conn.Read(buf)
-			if err != nil {
-				s.node.logger.Warn("subscriber connection lost", "topic", s.subscribedTo, "error", err)
-				s.isConnected = false
-				if s.conn != nil {
-					s.conn.Close()
-				}
-				continue
-			}
-
-			err = s.serializer.Decode(buf[:n], &data)
-			if err != nil {
-				s.node.logger.Error("subscriber decode failed", "topic", s.subscribedTo, "error", err)
-				continue
-			}
-
-			s.mutex.Lock()
-			s.lastData = data
-			s.mutex.Unlock()
-
-			select {
-			case s.pushSig <- struct{}{}:
-			default:
-			}
 		}
+
+		// io.ReadFull, not conn.Read(buf): a Unix domain socket has no
+		// message framing of its own, so a bare Read() into the whole pool
+		// buffer can return more than one already-written value
+		// concatenated together once the publisher gets ahead of this
+		// loop - reading exactly one payload's worth never over-reads into
+		// the next message.
+		if _, err := io.ReadFull(s.conn, buf[:payloadSize]); err != nil {
+			s.node.logger.Warn("subscriber connection lost", "topic", s.subscribedTo, "error", err)
+			s.conn.Close()
+
+			bo := backoff.WithContext(backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)), s.ctx)
+			if err := backoff.Retry(s.connect, bo); err != nil {
+				return // ctx cancelled, or a permanent type mismatch - nothing more this goroutine can do
+			}
+			continue
+		}
+
+		var data K
+		if err := s.serializer.Decode(buf[:payloadSize], &data); err != nil {
+			s.node.logger.Error("subscriber decode failed", "topic", s.subscribedTo, "error", err)
+			continue
+		}
+
+		s.push(data)
 	}
+}
+
+// push adds v to the queue, evicting the oldest unread value first if the
+// queue is already full. Only ever called from run() (the sole producer).
+func (s *Subscriber[K]) push(v K) {
+	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+
+	if s.count == len(s.queue) {
+		var zero K
+		s.queue[s.head] = zero // don't hold onto it longer than necessary
+		s.head = (s.head + 1) % len(s.queue)
+		s.count--
+	}
+
+	tail := (s.head + s.count) % len(s.queue)
+	s.queue[tail] = v
+	s.count++
+	s.queueCond.Signal()
+}
+
+// Get returns the oldest value not yet returned, blocking if the queue is
+// currently empty. Safe for concurrent callers: each gets the next value
+// in FIFO order, none see the same value twice.
+func (s *Subscriber[K]) Get() (K, error) {
+	var zero K
+
+	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+
+	for s.count == 0 {
+		if err := s.ctx.Err(); err != nil {
+			return zero, err
+		}
+		s.queueCond.Wait()
+	}
+
+	v := s.queue[s.head]
+	s.queue[s.head] = zero
+	s.head = (s.head + 1) % len(s.queue)
+	s.count--
+	return v, nil
 }
 
 func (s *Subscriber[K]) connect() error {
@@ -153,22 +211,30 @@ func (s *Subscriber[K]) connect() error {
 	_, err = conn.Write(buf[:n])
 	if err != nil {
 		logger.Error("failed to write into socket", "error", err)
+		conn.Close()
 		return err
 	}
 
 	_, err = conn.Read(buf)
 	if err != nil {
 		logger.Error("failed to read from socket", "error", err)
+		conn.Close()
 		return err
-	} else if buf[0] != globals.OK_STATUS_CODE {
-		err = fmt.Errorf("publisher data type is different.")
+	}
+	if buf[0] != globals.OK_STATUS_CODE {
+		conn.Close()
+		// BUGFIX: a type mismatch is permanent - K is fixed at compile time
+		// by the caller, so retrying can never fix it. backoff.Permanent
+		// stops the retry loop immediately instead of retrying forever,
+		// mirroring client-zig's Subscriber.connect() ("a type mismatch is
+		// permanent... only transient errors... should back off and
+		// retry").
+		err := fmt.Errorf("publisher data type is different")
 		logger.Error("failed to validate publisher input type", "error", err)
-		return err
+		return backoff.Permanent(err)
 	}
 
 	s.conn = conn
-	s.isConnected = true
-
 	return nil
 }
 

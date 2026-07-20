@@ -204,13 +204,22 @@ test "pubsub: multiple values arrive in order" {
     const publisher = try node.publish(u32, "pubsub_test_order");
     const subscriber = try node.subscribe(u32, "pubsub_test_order");
 
+    // BUGFIX: was 50 - Subscriber's queue (subscriber.zig) is now a bounded,
+    // oldest-evicted-first ring buffer (queue_capacity = 32) fed by a
+    // background task, not an unbounded pull straight off the wire, so a
+    // burst bigger than capacity is no longer guaranteed to arrive loss-free
+    // - see subscriber.zig's own "burst within queue capacity" and
+    // "overflow drops oldest" tests for that contract specifically. This
+    // one just needs to stay a simple in-order sanity check, safely under
+    // capacity.
+    const n = 20;
     var i: u32 = 0;
-    while (i < 50) : (i += 1) {
+    while (i < n) : (i += 1) {
         try publisher.publish(i);
     }
 
     i = 0;
-    while (i < 50) : (i += 1) {
+    while (i < n) : (i += 1) {
         try testing.expectEqual(i, try subscriber.next());
     }
 }
@@ -246,12 +255,41 @@ test "pubsub: dead subscriber is dropped from the client list" {
 
     const publisher = try node.publish(u32, "pubsub_test_dead_client");
 
+    // BUGFIX: this used to create a real Subscriber and close its own conn
+    // directly - inert back when nothing automatically read from a
+    // Subscriber unless a test explicitly called next(). Now every
+    // subscribe() spawns a background run() task that reads continuously
+    // and reconnects on its own if dropped, so a real Subscriber can't
+    // cleanly simulate "a client that's gone for good" anymore - closing
+    // its own fd would race run()'s in-flight read (a hard panic on this
+    // Io backend), and even routed through the publisher's side instead,
+    // the Subscriber would just reconnect and show back up in
+    // publisher.clients, racing this test's own assertion. Connecting a
+    // raw socket and completing the handshake by hand isolates this test
+    // back to just Publisher's own dead-client detection, with no
+    // self-healing Subscriber in the way.
     {
-        // this subscriber is only kept alive long enough to connect, then its
-        // connection is closed — simulating a subscriber process that died.
-        const doomed = try node.subscribe(u32, "pubsub_test_dead_client");
-        doomed.conn.close(io);
+        var path_buf: [256]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}{s}/{s}", .{ protocol.globals.PUBLISHER_SOCKET_DIR, "common", "pubsub_test_dead_client" });
+        const addr = try net.UnixAddress.init(path);
+        const conn = try addr.connect(io);
+
+        var w_buf: [64]u8 = undefined;
+        var w = conn.writer(io, &w_buf);
+        try w.interface.writeAll(mad.code(u32));
+        try w.interface.flush();
+
+        var r_buf: [1]u8 = undefined;
+        var r = conn.reader(io, &r_buf);
+        _ = try r.interface.takeByte();
+
+        conn.close(io); // dies immediately after handshaking - never touched again
     }
+
+    // Give the publisher's accept loop a moment to actually register the
+    // now-dead connection above before checking clients_num.
+    try io.sleep(std.Io.Duration.fromMilliseconds(100), .awake);
+    try testing.expectEqual(@as(usize, 1), publisher.clients_num);
 
     const survivor = try node.subscribe(u32, "pubsub_test_dead_client");
 
