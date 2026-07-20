@@ -29,8 +29,14 @@ var test_io_ready = false;
 fn ensureTestIoReady() void {
     if (test_io_ready) return;
     test_threaded = .init(std.heap.page_allocator, .{
-        .async_limit = .limited(64),
-        .concurrent_limit = .limited(64),
+        // 256, not 64: the concurrent-registration regression test below
+        // needs enough real concurrency to reliably exercise the race it
+        // guards against - verified: 20 concurrent tasks (under the old 64
+        // limit) and even 100 (under 128) didn't reproduce the pre-fix bug
+        // reliably, only 150 concurrent tasks with this higher limit did,
+        // twice in a row - see that test's own comment.
+        .async_limit = .limited(256),
+        .concurrent_limit = .limited(256),
     });
     test_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     test_io_ready = true;
@@ -450,4 +456,59 @@ test "spined: repeated concurrent GetInfo batches plateau instead of leaking" {
         );
     }
     try testing.expect(last_growth_kb < plateau_ceiling_kb);
+}
+
+fn registerOneTopicConcurrently(node: *spine.Node, idx: usize, errors_out: *std.atomic.Value(usize)) void {
+    var name_buf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "concurrent_reg_test_topic_{d}", .{idx}) catch return;
+    _ = node.publish(u32, name) catch |err| {
+        print("worker {d} failed: {any}\n", .{ idx, err });
+        _ = errors_out.fetchAdd(1, .monotonic);
+    };
+}
+
+// Regression test for a real deadlock: Node.sendRegistration (node.zig)
+// used to write to and read from self.spined_conn - a single connection
+// shared by every entity a Node ever registers - with no lock. Two tasks
+// registering entities on the same Node concurrently (e.g. two
+// io.concurrent calls to publish()/newService() on one Node) raced their
+// reads against each other's writes: spined answers requests in whatever
+// order it processes them, not tied to which task's read happens to be
+// waiting for a response, so a task could end up blocked forever reading a
+// response a different task's read had already consumed. Reproduced live
+// before the fix: this exact shape of test hung indefinitely (25s+,
+// confirmed via wall-clock timing that it wasn't a compile-time artifact)
+// at high enough concurrency - 20 concurrent tasks didn't reproduce it, 150
+// reliably did.
+//
+// Fixed by adding spined_conn_lock (std.Io.Mutex) to Node, held across the
+// whole write+read exchange in sendRegistration and across deinit's close
+// (not just the read half - that would still let two writes interleave).
+//
+// Caveat: unlike a wrong-value assertion, if this specific bug ever comes
+// back, this test doesn't fail fast - group.await(io) blocks forever right
+// along with the deadlocked tasks, so the whole test run hangs rather than
+// reporting a clean failure. That mirrors the bug's own nature (no
+// timeout, no error) rather than a limitation of the test; relies on the
+// CI runner's own job-level timeout to eventually surface it.
+test "spine client-lib: concurrent entity registration on one node does not deadlock" {
+    const io = testIo();
+    const allocator = testAllocator();
+
+    var child = try spawnSpined(io);
+    defer child.kill(io);
+
+    var node = try waitForRegisteredNode(io, allocator, "common", "concurrent_reg_test_node");
+    defer node.deinit();
+
+    const worker_count = 150;
+    var errors_out: std.atomic.Value(usize) = .init(0);
+    var group: std.Io.Group = .init;
+    var w: usize = 0;
+    while (w < worker_count) : (w += 1) {
+        try group.concurrent(io, registerOneTopicConcurrently, .{ &node, w, &errors_out });
+    }
+    try group.await(io);
+
+    try testing.expectEqual(@as(usize, 0), errors_out.load(.monotonic));
 }

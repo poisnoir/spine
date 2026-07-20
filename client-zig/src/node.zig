@@ -48,6 +48,21 @@ pub const Node = struct {
     // for purely local use, it just isn't registered anywhere and can't be
     // discovered by anything else.
     spined_conn: ?net.Stream,
+    // BUGFIX: guards every access to spined_conn (both sendRegistration's
+    // write+read exchange and deinit's close). sendRegistration used to
+    // write then read spined_conn with no synchronization - two tasks
+    // registering entities on the same Node concurrently (e.g. two
+    // io.concurrent calls to publish()/newService() on one Node) raced
+    // their reads against each other's writes. spined answers in whatever
+    // order it processes requests, not tied to which task's read happens to
+    // be waiting, so a task could end up blocked forever reading a response
+    // a different task's read had already consumed - a real, reproduced
+    // deadlock (25s+ hang at high concurrency), not just a data race.
+    // Held across the whole exchange, not just the read half, and across
+    // deinit's close+null-out too: locking only part of the critical
+    // section would still let two writes interleave, or let deinit close
+    // the connection out from under a read already in flight.
+    spined_conn_lock: std.Io.Mutex = .init,
 
     pub fn init(
         namespace: []const u8,
@@ -83,6 +98,9 @@ pub const Node = struct {
     }
 
     pub fn deinit(self: *Node) void {
+        self.spined_conn_lock.lock(self.io) catch return;
+        defer self.spined_conn_lock.unlock(self.io);
+
         if (self.spined_conn) |conn| {
             conn.close(self.io);
             self.spined_conn = null;
@@ -120,6 +138,9 @@ pub const Node = struct {
     // this is generic over PayloadType rather than three separate copies of
     // the same send/read-status logic.
     fn sendRegistration(self: *Node, comptime PayloadType: type, op_code: u8, payload: PayloadType) !void {
+        try self.spined_conn_lock.lock(self.io);
+        defer self.spined_conn_lock.unlock(self.io);
+
         const conn = self.spined_conn orelse return;
 
         var w_buf: [256]u8 = undefined;

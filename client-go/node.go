@@ -131,6 +131,18 @@ type Node struct {
 	stringSerializer *mad.Mad[spineString]
 
 	spinedConn net.Conn
+	// BUGFIX: guards every access to spinedConn. sendRegistration used to
+	// write then read spinedConn with no synchronization at all - two
+	// goroutines registering entities on the same Node concurrently (e.g.
+	// NewPublisher and NewService called from separate goroutines) raced
+	// their Read() calls against each other's Write()s. spined answers in
+	// whatever order it processes requests, not in a way tied to which
+	// goroutine's Read() happens to be waiting, so a goroutine could end up
+	// blocked forever reading a response that had already been consumed by
+	// a different goroutine's Read() - a real, reproduced deadlock, not
+	// just a data race. See ServiceCaller.lock for the same pattern applied
+	// to a per-entity connection instead of the shared per-Node one.
+	spinedConnMu sync.Mutex
 }
 
 func CreateNode(namespace string, name string, ctx context.Context, logger *slog.Logger) (*Node, error) {
@@ -221,6 +233,15 @@ func sendRegistration[T any](n *Node, opCode uint8, payload T) error {
 
 	buf[0] = opCode
 	ser.Encode(&payload, buf[1:])
+
+	// Held across both the write and its matching read: spinedConn is one
+	// connection shared by every entity this Node ever registers, and a
+	// response has no correlation ID tying it back to the request that
+	// caused it - only "whichever Read() happens to run next on this
+	// connection" gets it. Without serializing the whole exchange, two
+	// concurrent callers' requests/responses can interleave arbitrarily.
+	n.spinedConnMu.Lock()
+	defer n.spinedConnMu.Unlock()
 
 	_, err := n.spinedConn.Write(buf[:1+ser.GetRequiredSize()])
 	if err != nil {
