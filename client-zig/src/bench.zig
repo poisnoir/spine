@@ -32,10 +32,6 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(0);
 }
 
-// BUGFIX: std.time.Timer doesn't exist in this zig version — time/sleep
-// moved under std.Io along with the rest of the async I/O model (see
-// Subscriber's backoff, which already uses io.sleep). std.Io.Clock.Timestamp
-// is the replacement for wall-clock timing.
 fn now(io: std.Io) std.Io.Clock.Timestamp {
     return std.Io.Clock.Timestamp.now(io, .awake);
 }

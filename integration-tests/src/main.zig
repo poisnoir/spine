@@ -1,16 +1,15 @@
 // Unlike client-lib's own tests (which run with spined unreachable on
 // purpose, to test node-to-node local-only pub/sub), these tests spawn a
-// real `spined` binary and drive it with the real `spine` client-lib and
-// the real `squid` binary, over the actual (hardcoded) Unix socket paths.
-// This is the only place that exercises spined and its clients together as
-// separate processes - it's what would have caught the Io.Mutex init
-// deadlock earlier, which only ever showed up when a real client or squid
-// talked to a freshly started spined.
+// real `spined` binary and drive it with the real `spine` client-lib, over
+// the actual (hardcoded) Unix socket paths. This is the only place that
+// exercises spined and its clients together as separate processes - it's
+// what would have caught the Io.Mutex init deadlock earlier, which only
+// ever showed up when a real client talked to a freshly started spined.
 //
-// Run with `zig build test-integration`. Requires zig-out/bin/{spined,squid}
-// to already be built (the build step depends on the install step for
-// this), and must be run from the repository root, since the binary paths
-// below are relative.
+// Run with `zig build test-integration`. Requires zig-out/bin/spined to
+// already be built (the build step depends on the install step for this),
+// and must be run from the repository root, since the binary path below is
+// relative.
 
 const std = @import("std");
 const testing = std.testing;
@@ -20,7 +19,6 @@ const protocol = @import("protocol");
 const globals = protocol.globals;
 
 const spined_bin = "zig-out/bin/spined";
-const squid_bin = "zig-out/bin/squid";
 
 var test_threaded: std.Io.Threaded = undefined;
 var test_arena: std.heap.ArenaAllocator = undefined;
@@ -79,7 +77,8 @@ fn spawnSpined(io: std.Io) !std.process.Child {
 // SPINED_PATH is a real file, created the instant Spined.init()'s bind()
 // call succeeds - polling for it to exist is a clean, noise-free way to
 // know spined is up and accepting connections (both node registrations and
-// squid commands go over this one socket now).
+// one-shot control commands like addNamespace/getInfo go over this one
+// socket now).
 fn waitForSpinedReady(io: std.Io) !void {
     var attempt: usize = 0;
     while (attempt < 100) : (attempt += 1) {
@@ -219,30 +218,6 @@ test "spined + spine client-lib: a bind() failure after spined approves registra
     try testing.expectEqual(@as(u32, 7), try subscriber.next());
 }
 
-test "spined + squid: adding a namespace shows up in squid info" {
-    const io = testIo();
-    const allocator = testAllocator();
-
-    var child = try spawnSpined(io);
-    defer child.kill(io);
-    try waitForSpinedReady(io);
-
-    const add = try std.process.run(allocator, io, .{
-        .argv = &.{ squid_bin, "add", "namespace", "integration_test_ns" },
-    });
-    print("squid: {s}", .{add.stderr});
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, add.term);
-
-    const info = try std.process.run(allocator, io, .{
-        .argv = &.{ squid_bin, "info" },
-    });
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, info.term);
-    print("squid: {s}", .{info.stderr});
-    // squid's output goes through std.debug.print, which writes to stderr,
-    // not stdout.
-    try testing.expect(std.mem.indexOf(u8, info.stderr, "integration_test_ns") != null);
-}
-
 test "spined + spine client-lib: addNamespace shows up in getInfo" {
     const io = testIo();
     const allocator = testAllocator();
@@ -300,25 +275,4 @@ test "spined + spine client-lib: addNamespace rejects a duplicate namespace" {
         error.NamespaceAlreadyRegistered,
         spine.addNamespace(io, "dup_client_lib_test_ns"),
     );
-}
-
-test "spined + squid: registering the same namespace twice is rejected" {
-    const io = testIo();
-    const allocator = testAllocator();
-
-    var child = try spawnSpined(io);
-    defer child.kill(io);
-    try waitForSpinedReady(io);
-
-    const first = try std.process.run(allocator, io, .{
-        .argv = &.{ squid_bin, "add", "namespace", "dup_test_ns" },
-    });
-    print("squid: {s}", .{first.stderr});
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, first.term);
-
-    const second = try std.process.run(allocator, io, .{
-        .argv = &.{ squid_bin, "add", "namespace", "dup_test_ns" },
-    });
-    print("squid: {s}", .{second.stderr});
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, second.term);
 }
