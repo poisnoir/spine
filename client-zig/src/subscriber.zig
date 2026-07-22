@@ -12,17 +12,7 @@ pub const SubscribeError = error{
 
 // Generic subscriber: connects directly to the publisher's unix socket
 // (independent of spined — the socket path is a fixed convention), performs
-// mad's type-fingerprint handshake, then keeps a bounded, most-recent-wins
-// queue of decoded values fed by a background task, with next() popping
-// from it.
-//
-// This is a deliberate divergence from a strict pull model (which this type
-// used to be, and which client-go's Subscriber still was until it hit the
-// same tradeoff from the other direction): reading is decoupled from
-// draining, and a caller of next() slower than the publisher just misses
-// its own oldest unread values instead of ever stalling the publisher or
-// other subscribers of the same topic - see the queue-overflow tests below
-// for the exact contract.
+// mad's type-fingerprint handshake, then decodes one K per next() call.
 pub fn Subscriber(comptime K: type) type {
     return struct {
         io: std.Io,
@@ -33,25 +23,11 @@ pub fn Subscriber(comptime K: type) type {
         r_buf: [protocol.globals.MAX_PACKET_SIZE]u8 = undefined,
         reader: net.Stream.Reader = undefined,
 
-        // Bounded ring buffer of decoded values not yet returned by next().
-        // run() is the sole producer; next() is the (possibly concurrent)
-        // consumer. queue_cond signals "the queue became non-empty" -
-        // next() re-checks count after waking since Condition.wait can
-        // return spuriously.
-        queue: [queue_capacity]K = undefined,
-        head: usize = 0,
-        count: usize = 0,
-        queue_lock: std.Io.Mutex = .init,
-        queue_cond: std.Io.Condition = .init,
-
         const Self = @This();
-        const queue_capacity = 32;
 
         // Retries the dial+handshake with exponential backoff — the publisher may not have started its
         // listener yet, or may be mid-restart, and a tight retry loop would
         // otherwise spin a core at 100% doing nothing but failing connects.
-        // Called once for the initial connection (from Node.subscribe, via
-        // start() below) and again by run() internally on every reconnect.
         pub fn connect(self: *Self, io: std.Io, namespace: []const u8, topic: []const u8) !void {
             var backoff: Backoff = .{};
 
@@ -76,21 +52,14 @@ pub fn Subscriber(comptime K: type) type {
             const path = try std.fmt.bufPrint(&path_buf, "{s}{s}/{s}", .{ protocol.globals.PUBLISHER_SOCKET_DIR, namespace, topic });
 
             const conn = try protocol.network.dial(io, path);
-
-            // BUGFIX-adjacent: this used to be a blanket `self.* = .{...}`
-            // literal, which is fine for the very first connect (self is
-            // freshly allocated, uninitialized memory) but dial() is also
-            // called to reconnect from *inside* run() - and a concurrent
-            // next() call could be actively waiting on queue_cond (which
-            // internally holds a pointer to queue_lock) at that exact
-            // moment. Resetting queue_lock/queue_cond/queue/head/count out
-            // from under a waiter would corrupt them, the same class of bug
-            // already fixed in service_caller.zig's dial() for its own
-            // .lock field. Assign only the connection-related fields.
-            self.io = io;
-            self.conn = conn;
-            self.namespace = namespace;
-            self.topic = topic;
+            self.* = .{
+                .io = io,
+                .conn = conn,
+                .namespace = namespace,
+                .topic = topic,
+                .r_buf = undefined,
+                .reader = undefined,
+            };
             self.reader = conn.reader(io, &self.r_buf);
 
             var w_buf: [64]u8 = undefined;
@@ -107,74 +76,61 @@ pub fn Subscriber(comptime K: type) type {
             print("spine: subscribed to topic '{s}'\n", .{topic});
         }
 
-        // Spawns the background task that keeps the queue fed. Node.subscribe()
-        // calls this once, after connect() has already succeeded - not
-        // connect() itself, since connect() is also called (without spawning
-        // another task) whenever run() needs to reconnect.
-        pub fn start(self: *Self) !void {
-            _ = try self.io.concurrent(Self.run, .{self});
+        // Blocks until the next published message arrives, then decodes it.
+        // If more than one payload's worth is already sitting in the
+        // reader's own buffer (a burst arrived faster than this was called -
+        // see Publisher's coalescing mailbox, which bounds how much gets
+        // *sent* but not how much can land in this socket's kernel buffer
+        // before this side catches up), keeps consuming and discards
+        // everything but the newest, so a caller of next() always gets the
+        // latest published value, never a stale backlog - verified live:
+        // publishing 500 values in a tight burst then one final sentinel
+        // value used to hand back some arbitrary mid-burst value instead of
+        // the sentinel, since this used to just return the *oldest* unread
+        // byte off the wire like any plain FIFO socket read.
+        //
+        // BUGFIX: a read failure (publisher died/restarted) used to surface
+        // straight to the caller as an error, unlike spine-go's Subscriber,
+        // which reconnects transparently in its background goroutine and
+        // just keeps Get() blocked until new data shows up. next() now does
+        // the synchronous equivalent: on a read failure, reconnect (with the
+        // same unlimited backoff as the initial connect) and retry the read,
+        // rather than surfacing a transient disconnect as an error. Reading
+        // has no side effects, so retrying here has none of the
+        // at-most-once/idempotency concerns ServiceCaller.call() has.
+        pub fn next(self: *Self) !K {
+            const size = mad.getRequiredSize(K);
+            var latest = try self.readOne(size);
+
+            // bufferedLen() inspects the reader's own in-memory buffer, left
+            // over from take()'s last underlying refill - no new syscall, so
+            // this can never block or race against a producer that stops
+            // sending mid-drain: it only ever consumes what's already here.
+            while (self.reader.interface.bufferedLen() >= size) {
+                latest = try self.readOne(size);
+            }
+            return latest;
         }
 
-        fn run(self: *Self) void {
-            const size = mad.getRequiredSize(K);
+        fn readOne(self: *Self, size: usize) !K {
             while (true) {
                 const msg = self.reader.interface.take(size) catch |err| {
                     print("spine: subscriber connection to topic '{s}' lost ({any}), reconnecting\n", .{ self.topic, err });
                     self.conn.close(self.io);
-                    self.connect(self.io, self.namespace, self.topic) catch |cerr| {
-                        print("spine: subscriber for topic '{s}' giving up: {any}\n", .{ self.topic, cerr });
-                        return; // permanent type mismatch - nothing more this task can do
-                    };
+                    try self.connect(self.io, self.namespace, self.topic);
                     continue;
                 };
                 var out: K = undefined;
                 _ = mad.decode(K, &out, msg);
-                self.push(out) catch |err| {
-                    print("spine: subscriber for topic '{s}' failed to queue a value: {any}\n", .{ self.topic, err });
-                    return;
-                };
+                return out;
             }
-        }
-
-        // Adds v to the queue, evicting the oldest unread value first if the
-        // queue is already full. Only ever called from run() (the sole
-        // producer).
-        fn push(self: *Self, v: K) !void {
-            try self.queue_lock.lock(self.io);
-            defer self.queue_lock.unlock(self.io);
-
-            if (self.count == queue_capacity) {
-                self.head = (self.head + 1) % queue_capacity;
-                self.count -= 1;
-            }
-
-            const tail = (self.head + self.count) % queue_capacity;
-            self.queue[tail] = v;
-            self.count += 1;
-            self.queue_cond.signal(self.io);
-        }
-
-        // Returns the oldest value not yet returned, blocking if the queue
-        // is currently empty. Safe for concurrent callers: each gets the
-        // next value in FIFO order, none see the same value twice.
-        pub fn next(self: *Self) !K {
-            try self.queue_lock.lock(self.io);
-            defer self.queue_lock.unlock(self.io);
-
-            while (self.count == 0) {
-                try self.queue_cond.wait(self.io, &self.queue_lock);
-            }
-
-            const v = self.queue[self.head];
-            self.head = (self.head + 1) % queue_capacity;
-            self.count -= 1;
-            return v;
         }
     };
 }
 
 const testing = std.testing;
 const Node = @import("node.zig").Node;
+const Publisher = @import("publisher.zig").Publisher;
 const test_support = @import("test_support.zig");
 const testIo = test_support.testIo;
 const testAllocator = test_support.testAllocator;
@@ -209,20 +165,43 @@ test "pubsub: subscriber reconnects after connection drop" {
     try publisher.publish(1);
     try testing.expectEqual(@as(u32, 1), try subscriber.next());
 
-    // Simulate the connection dying by closing the *publisher's* accepted
-    // copy of it (and forgetting it from clients so publish() never reuses
-    // that same fd) — not the subscriber's own fd. Closing your own fd and
-    // then reusing it is a real use-after-close bug (this Io backend panics
-    // on it, correctly), not a stand-in for a remote disconnect. Closing the
-    // *peer's* end and leaving the subscriber's own fd untouched is exactly
-    // how a real disconnect gets observed: run()'s next read on its own
-    // still-valid fd sees a genuine EOF/error, no unsafe fd reuse involved.
-    publisher.clients[0].close(io);
-    publisher.clients_num = 0;
+    // Simulate the connection dying by shutting down (not closing) the
+    // *publisher's* accepted copy of it — not the subscriber's own fd.
+    //
+    // BUGFIX: this used to `.close()` clients[0].conn directly, on the same
+    // reasoning as the old synchronous design ("closing your own fd and
+    // reusing it is a use-after-close bug, so close the *peer's* side
+    // instead"). That reasoning no longer holds here: clients[0].conn is now
+    // also the *sole property* of that slot's own long-lived clientWriter
+    // task, which the test has no part in - closing it out from under that
+    // task, then letting clientWriter's own later write attempt touch the
+    // same already-closed fd, reproduced live as a hard panic ("programmer
+    // bug caused syscall error: BADF"), the exact use-after-close class this
+    // whole pattern exists to avoid, just from the *other* direction.
+    // shutdown() severs the connection (future reads/writes fail with a
+    // normal, catchable ECONNRESET/EPIPE) without invalidating the fd
+    // itself, so clientWriter remains the only thing that ever calls
+    // .close() on it, whenever it naturally discovers the failure.
+    //
+    // This also used to directly poke occupied[0]/clients_num to "forget"
+    // the slot immediately - unsafe for the same underlying reason: slot 0's
+    // clientWriter is still alive and blocked in slot.event.wait() at this
+    // point (it's event-driven, with no way to notice a dead connection on
+    // its own until it next tries to write to it), so freeing the slot let
+    // the reconnecting subscriber's new connection claim that same index in
+    // handshake(), re-initializing its Event out from under the still-
+    // waiting old task - a second, independent hard panic ("reset called
+    // before pending wait returned"). Doing nothing else here is correct and
+    // sufficient: the reconnecting subscriber claims a *different*,
+    // actually-free slot, and slot 0 gets discovered dead (and only then
+    // reclaimed) the ordinary way, the next time publish() below tries to
+    // write to it - same two-step detect-then-reclaim path as the "dead
+    // subscriber is dropped" test in publisher.zig.
+    try publisher.clients[0].conn.shutdown(io, .both);
 
     var future = io.async(Subscriber(u32).next, .{subscriber});
 
-    // give run() a moment to notice the closed conn and reconnect before
+    // give next() a moment to notice the closed conn and reconnect before
     // publishing — dialing a local unix socket is fast but not instant.
     try io.sleep(std.Io.Duration.fromMilliseconds(200), .awake);
     try publisher.publish(2);
@@ -261,112 +240,68 @@ test "subscribe: dialing a crashed producer's stale socket clears it instead of 
     }
 }
 
-// A burst that fits inside the queue's capacity must never lose anything -
-// only a burst that actually overflows the queue should drop anything, and
-// only its oldest entries (see the overflow test below).
-test "pubsub: burst within queue capacity delivers every value in order" {
+// SCRATCH demo, not a real assertion-bearing test: proves the
+// head-of-line-blocking property discussed for the old (current) design
+// live, rather than just asserting it. Publisher.publish() writes to
+// clients sequentially under one lock (publisher.zig) - a subscriber that
+// never drains its socket eventually fills the kernel's send buffer for
+// that connection, and publish()'s write to it blocks. Since the write
+// loop can't skip ahead, that blocks every *subsequent* client in the list
+// too, and since the lock is held for the whole call, every other task's
+// publish() on this topic blocks as well.
+//
+// fast_sub is subscribed first (so it's earlier in clients[] than
+// slow_sub) and drains continuously; slow_sub never calls next() at all.
+// Both a background publisher task and fast_sub's reader run unbounded -
+// nothing here is awaited, so a permanent stall (the expected outcome)
+// can't hang the test itself; it's observed via atomics.
+test "SCRATCH: a slow subscriber blocks the publisher and every other subscriber" {
     const io = testIo();
     const allocator = testAllocator();
 
-    var node = try Node.init("common", "pubsub_test_withincap_node", io, allocator);
+    var node = try Node.init("common", "slow_sub_demo_node", io, allocator);
     defer node.deinit();
 
-    const publisher = try node.publish(u32, "pubsub_test_withincap");
-    const subscriber = try node.subscribe(u32, "pubsub_test_withincap");
+    const publisher = try node.publish(u32, "slow_sub_demo_topic");
+    const fast_sub = try node.subscribe(u32, "slow_sub_demo_topic");
+    _ = try node.subscribe(u32, "slow_sub_demo_topic"); // slow_sub: never drained, on purpose
 
-    const n = Subscriber(u32).queue_capacity; // exactly at capacity - must not overflow
-    var i: u32 = 0;
-    while (i < n) : (i += 1) {
-        try publisher.publish(i);
-    }
+    const FastReader = struct {
+        var received: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+        fn run(sub: *Subscriber(u32)) void {
+            while (true) {
+                _ = sub.next() catch return;
+                _ = received.fetchAdd(1, .monotonic);
+            }
+        }
+    };
+    var fast_future = io.async(FastReader.run, .{fast_sub});
+    _ = &fast_future;
 
-    // Give run() time to read, decode, and queue all n values before we
-    // start draining - this test is about the queue's own contents, not a
-    // race between producer and consumer.
-    try io.sleep(std.Io.Duration.fromMilliseconds(300), .awake);
+    const PublishLoop = struct {
+        var completed: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+        fn run(p: *Publisher(u32)) void {
+            var i: u32 = 0;
+            while (true) : (i += 1) {
+                p.publish(i) catch return;
+                _ = completed.fetchAdd(1, .monotonic);
+            }
+        }
+    };
+    var publish_future = io.async(PublishLoop.run, .{publisher});
+    _ = &publish_future;
 
-    i = 0;
-    while (i < n) : (i += 1) {
-        try testing.expectEqual(i, try subscriber.next());
-    }
-}
+    try io.sleep(std.Io.Duration.fromSeconds(3), .awake);
+    const completed_3s = PublishLoop.completed.load(.monotonic);
+    const received_3s = FastReader.received.load(.monotonic);
+    print("SCRATCH: after 3s - publish() calls completed: {d}, fast_sub received: {d}\n", .{ completed_3s, received_3s });
 
-// A burst that exceeds the queue's capacity must evict the *oldest* unread
-// values to make room for newer ones, keeping exactly the newest
-// queue_capacity, still in order - not drop newest, not reorder, not
-// silently keep stale data indefinitely.
-test "pubsub: overflow drops oldest values, keeps newest in order" {
-    const io = testIo();
-    const allocator = testAllocator();
-
-    var node = try Node.init("common", "pubsub_test_overflow_node", io, allocator);
-    defer node.deinit();
-
-    const publisher = try node.publish(u32, "pubsub_test_overflow");
-    const subscriber = try node.subscribe(u32, "pubsub_test_overflow");
-
-    const n: u32 = 100; // > queue_capacity (32): guarantees overflow
-    var i: u32 = 0;
-    while (i < n) : (i += 1) {
-        try publisher.publish(i);
-    }
-
-    // Deliberately not draining via next() until after every value has
-    // been published and (almost certainly) already read+queued by run() -
-    // the queue needs to have actually overflowed before this test means
-    // anything.
-    try io.sleep(std.Io.Duration.fromMilliseconds(300), .awake);
-
-    const first_expected = n - Subscriber(u32).queue_capacity;
-    i = first_expected;
-    while (i < n) : (i += 1) {
-        try testing.expectEqual(i, try subscriber.next());
-    }
-}
-
-// Plain-u32-returning wrapper so the Future array below has a simple,
-// concrete element type instead of fighting next()'s own inferred error set.
-fn nextOrPanic(sub: *Subscriber(u32)) u32 {
-    return sub.next() catch |err| std.debug.panic("next() failed: {any}", .{err});
-}
-
-// Concurrent next() callers are meant to be safe, each getting a distinct
-// value in FIFO order (see next()'s own doc comment) - the queue is shared
-// mutable state now guarded by queue_lock/queue_cond instead of a single
-// synchronous read per call, so this is worth its own direct check rather
-// than only trusting the reasoning behind that design. One caller per
-// value (rather than a few callers each doing several next() calls) for
-// maximal concurrent contention on the queue.
-test "pubsub: concurrent next() callers each get distinct sequential values" {
-    const io = testIo();
-    const allocator = testAllocator();
-
-    var node = try Node.init("common", "pubsub_test_concurrent_next_node", io, allocator);
-    defer node.deinit();
-
-    const publisher = try node.publish(u32, "pubsub_test_concurrent_next");
-    const subscriber = try node.subscribe(u32, "pubsub_test_concurrent_next");
-
-    const n = Subscriber(u32).queue_capacity; // one concurrent caller per value
-
-    var futures: [n]std.Io.Future(u32) = undefined;
-    for (&futures) |*f| {
-        f.* = io.async(nextOrPanic, .{subscriber});
-    }
-
-    var i: u32 = 0;
-    while (i < n) : (i += 1) {
-        try publisher.publish(i);
-    }
-
-    var seen = [_]bool{false} ** n;
-    for (&futures) |*f| {
-        const v = f.await(io);
-        try testing.expect(v < n);
-        try testing.expect(!seen[v]); // no value delivered to more than one caller
-        seen[v] = true;
-    }
-    for (seen) |was_seen| {
-        try testing.expect(was_seen); // every value delivered to exactly one caller
-    }
+    try io.sleep(std.Io.Duration.fromSeconds(2), .awake);
+    const completed_5s = PublishLoop.completed.load(.monotonic);
+    const received_5s = FastReader.received.load(.monotonic);
+    print("SCRATCH: after 5s - publish() calls completed: {d} (+{d}), fast_sub received: {d} (+{d})\n", .{
+        completed_5s,           completed_5s -| completed_3s,
+        received_5s, received_5s -| received_3s,
+    });
+    print("SCRATCH: if both deltas are 0, the publisher (and fast_sub with it) is permanently stalled on slow_sub's full socket buffer\n", .{});
 }

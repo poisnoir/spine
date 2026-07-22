@@ -17,12 +17,69 @@ pub fn Publisher(comptime K: type) type {
     }
 
     return struct {
+        // Per-client "latest value wins" mailbox: publish() overwrites
+        // pending and flips event; clientWriter (spawned once per accepted
+        // connection, not once per publish() call) wakes on event and sends
+        // whatever's currently there. If clientWriter falls behind a fast
+        // publisher, it just skips straight to the newest value next time it
+        // wakes - it never sees every value, only ever the latest.
+        //
+        // This replaces an earlier design where publish() wrote to every
+        // client synchronously, one at a time, under one lock: a client that
+        // never drained its socket blocked that write forever, which froze
+        // delivery to every *other* subscriber too (the loop couldn't reach
+        // them) and every other task's publish() call on this topic (the
+        // lock was held the whole time) - verified live (see subscriber.zig's
+        // "a slow subscriber blocks the publisher and every other
+        // subscriber" test) before this existed. A write-deadline fix (kill
+        // a client that doesn't drain within N ms) closed that but added a
+        // background task + timeout wait to *every* publish() call, even
+        // when nothing was wrong (measured ~5x slower for the common single-
+        // healthy-subscriber case). This design gives publish() itself no
+        // blocking I/O and no per-call task spawn at all: it only ever does
+        // a short mutex-guarded value copy and an event flip per client, so
+        // a slow client can never delay publish() or any other client's
+        // delivery, without paying a tax when everything's healthy.
+        const ClientSlot = struct {
+            conn: net.Stream,
+            // Guards pending/has_pending specifically - publish() (the sole
+            // writer, itself already serialized by Self.lock below) and this
+            // slot's own clientWriter (the sole reader) are the only two
+            // tasks that ever touch these, so this is a short, essentially
+            // uncontended critical section, never held across the actual
+            // socket write.
+            pending_lock: std.Io.Mutex = .init,
+            pending: K = undefined,
+            has_pending: bool = false,
+            event: std.Io.Event = .unset,
+            // Set by clientWriter right before it exits (write failed) -
+            // publish() checks this to reclaim the slot. Acquire/release
+            // paired: by the time publish() observes `dead == true`,
+            // clientWriter is guaranteed to have already stopped touching
+            // this slot (its last write to any field happens-before this
+            // store), so reclaiming/reinitializing the slot's memory is safe.
+            dead: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        };
+
         io: std.Io,
         topic: []const u8,
         listener: net.Server,
 
-        clients: [protocol.globals.MAX_SUBSCRIBERS_PER_PUBLISHER]net.Stream = undefined,
+        // Slots never relocate once claimed: clientWriter holds &clients[i]
+        // for its whole lifetime (same "fixed address, never move" reasoning
+        // as Subscriber's own heap allocation - see node.zig's subscribe()).
+        // occupied[i] tracks whether clients[i] is a live connection, not
+        // clients_num/swap-removal like the old design - a slot's position
+        // is stable from the moment it's claimed until it's reclaimed.
+        clients: [protocol.globals.MAX_SUBSCRIBERS_PER_PUBLISHER]ClientSlot = undefined,
+        occupied: [protocol.globals.MAX_SUBSCRIBERS_PER_PUBLISHER]bool =
+            [_]bool{false} ** protocol.globals.MAX_SUBSCRIBERS_PER_PUBLISHER,
+        // Maintained alongside occupied purely for the "N total" log line and
+        // test/external visibility - not used for indexing.
         clients_num: usize = 0,
+        // Guards occupied[]/clients_num/claiming a slot in handshake() and
+        // reclaiming one in publish() - never held across a socket write or
+        // an event wait, only short array/counter bookkeeping.
         lock: std.Io.Mutex = .init,
 
         const Self = @This();
@@ -38,6 +95,7 @@ pub fn Publisher(comptime K: type) type {
                 .topic = topic,
                 .listener = srv,
                 .clients = undefined,
+                .occupied = [_]bool{false} ** protocol.globals.MAX_SUBSCRIBERS_PER_PUBLISHER,
                 .clients_num = 0,
                 .lock = .init,
             };
@@ -99,15 +157,25 @@ pub fn Publisher(comptime K: type) type {
             // `clients`, opening a window where a publish() racing right
             // after subscribe() returned could be missed entirely.
             try self.lock.lock(self.io);
-            if (self.clients_num >= protocol.globals.MAX_SUBSCRIBERS_PER_PUBLISHER) {
+            var slot_index: ?usize = null;
+            for (0..protocol.globals.MAX_SUBSCRIBERS_PER_PUBLISHER) |idx| {
+                if (!self.occupied[idx]) {
+                    slot_index = idx;
+                    break;
+                }
+            }
+            const idx = slot_index orelse {
                 self.lock.unlock(self.io);
                 conn.close(self.io);
                 return;
-            }
-            self.clients[self.clients_num] = conn;
+            };
+            self.clients[idx] = .{ .conn = conn };
+            self.occupied[idx] = true;
             self.clients_num += 1;
             const total = self.clients_num;
             self.lock.unlock(self.io);
+
+            _ = try self.io.concurrent(clientWriter, .{ self, &self.clients[idx] });
 
             try w.interface.writeInt(u8, protocol.globals.OK_STATUS, .big);
             try w.interface.flush();
@@ -115,22 +183,33 @@ pub fn Publisher(comptime K: type) type {
             print("spine: subscriber joined topic '{s}' ({d} total)\n", .{ self.topic, total });
         }
 
-        // Broadcasts data to every currently-connected subscriber. Dead
-        // connections (write failures) are dropped via swap-removal, the
-        // same pattern spined's own cleanNode uses for its fixed-size arrays.
-        pub fn publish(self: *Self, data: K) !void {
-            const size = mad.getRequiredSize(K);
-            var buf: [protocol.globals.MAX_PACKET_SIZE]u8 = undefined;
-            _ = mad.encode(K, data, buf[0..size]);
+        // The sole reader of this slot's pending/has_pending, and the sole
+        // writer of its conn - one dedicated task per connected client,
+        // spawned once at accept time, living until the write it's doing
+        // fails (client actually gone) - not once per publish() call.
+        fn clientWriter(self: *Self, slot: *ClientSlot) void {
+            while (true) {
+                slot.event.wait(self.io) catch return;
+                slot.event.reset();
 
-            try self.lock.lock(self.io);
-            defer self.lock.unlock(self.io);
+                slot.pending_lock.lock(self.io) catch return;
+                const value = slot.pending;
+                const has = slot.has_pending;
+                slot.has_pending = false;
+                slot.pending_lock.unlock(self.io);
 
-            var i: usize = 0;
-            while (i < self.clients_num) {
+                // Spurious wake, or another clientWriter iteration already
+                // consumed this signal - shouldn't normally happen given
+                // Event's own "no pending wait" precondition on reset(), but
+                // cheap to guard rather than assume.
+                if (!has) continue;
+
+                const size = mad.getRequiredSize(K);
+                var buf: [protocol.globals.MAX_PACKET_SIZE]u8 = undefined;
+                _ = mad.encode(K, value, buf[0..size]);
+
                 var w_buf: [protocol.globals.MAX_PACKET_SIZE]u8 = undefined;
-                var w = self.clients[i].writer(self.io, &w_buf);
-
+                var w = slot.conn.writer(self.io, &w_buf);
                 const failed = blk: {
                     w.interface.writeAll(buf[0..size]) catch break :blk true;
                     w.interface.flush() catch break :blk true;
@@ -138,12 +217,38 @@ pub fn Publisher(comptime K: type) type {
                 };
 
                 if (failed) {
-                    self.clients[i].close(self.io);
-                    self.clients_num -= 1;
-                    self.clients[i] = self.clients[self.clients_num];
-                } else {
-                    i += 1;
+                    slot.conn.close(self.io);
+                    slot.dead.store(true, .release);
+                    return;
                 }
+            }
+        }
+
+        // Hands the newest value to every currently-connected subscriber's
+        // clientWriter task - never blocks on any of them, and never blocks
+        // on any other task's concurrent publish() call for longer than a
+        // handful of short, uncontended lock acquisitions. Actual delivery
+        // (and any blocking that entails) happens entirely in each client's
+        // own clientWriter, outside this call.
+        pub fn publish(self: *Self, data: K) !void {
+            try self.lock.lock(self.io);
+            defer self.lock.unlock(self.io);
+
+            for (0..protocol.globals.MAX_SUBSCRIBERS_PER_PUBLISHER) |i| {
+                if (!self.occupied[i]) continue;
+                const slot = &self.clients[i];
+
+                if (slot.dead.load(.acquire)) {
+                    self.occupied[i] = false;
+                    self.clients_num -= 1;
+                    continue;
+                }
+
+                slot.pending_lock.lock(self.io) catch continue;
+                slot.pending = data;
+                slot.has_pending = true;
+                slot.pending_lock.unlock(self.io);
+                slot.event.set(self.io);
             }
         }
     };
@@ -204,24 +309,59 @@ test "pubsub: multiple values arrive in order" {
     const publisher = try node.publish(u32, "pubsub_test_order");
     const subscriber = try node.subscribe(u32, "pubsub_test_order");
 
-    // BUGFIX: was 50 - Subscriber's queue (subscriber.zig) is now a bounded,
-    // oldest-evicted-first ring buffer (queue_capacity = 32) fed by a
-    // background task, not an unbounded pull straight off the wire, so a
-    // burst bigger than capacity is no longer guaranteed to arrive loss-free
-    // - see subscriber.zig's own "burst within queue capacity" and
-    // "overflow drops oldest" tests for that contract specifically. This
-    // one just needs to stay a simple in-order sanity check, safely under
-    // capacity.
-    const n = 20;
+    // BUGFIX: was a tight publish-50-then-drain-50 burst, asserting every
+    // value arrives. Under the "latest value wins" mailbox (see Publisher's
+    // own doc comment), that's no longer true by design - a burst with
+    // nobody draining overwrites clientWriter's pending value long before it
+    // gets a chance to send most of them (see the coalescing test below for
+    // that contract directly). Alternating publish()+next() instead gives
+    // each value a natural synchronization point: next() only returns once
+    // that exact value has actually been delivered, so the following
+    // publish() can never race ahead of clientWriter and overwrite it first.
     var i: u32 = 0;
-    while (i < n) : (i += 1) {
+    while (i < 50) : (i += 1) {
+        try publisher.publish(i);
+        try testing.expectEqual(i, try subscriber.next());
+    }
+}
+
+// The flip side of the ordering test above: a burst with nobody draining is
+// exactly the scenario "latest value wins" is for - clientWriter should
+// skip straight to the newest pending value once it's finally scheduled,
+// not work through a backlog.
+test "pubsub: a burst with no reader delivers only the latest value" {
+    const io = testIo();
+    const allocator = testAllocator();
+
+    var node = try Node.init("common", "pubsub_test_coalesce_node", io, allocator);
+    defer node.deinit();
+
+    const publisher = try node.publish(u32, "pubsub_test_coalesce");
+    const subscriber = try node.subscribe(u32, "pubsub_test_coalesce");
+
+    var i: u32 = 0;
+    while (i < 500) : (i += 1) {
         try publisher.publish(i);
     }
 
-    i = 0;
-    while (i < n) : (i += 1) {
-        try testing.expectEqual(i, try subscriber.next());
-    }
+    // Give clientWriter a chance to actually run and send whatever it finds
+    // pending - it may have already sent an earlier value or two before this
+    // burst finished (there's no guarantee it was fully idle the whole time,
+    // just that it can never fall further behind than "the latest"), so this
+    // only asserts against the one thing the design actually promises: the
+    // very last value published must be the one this eventually reads,
+    // whatever else happened before it.
+    try io.sleep(std.Io.Duration.fromMilliseconds(100), .awake);
+    try publisher.publish(999);
+
+    // publish() returns as soon as it hands 999 to clientWriter's mailbox,
+    // not once clientWriter has actually sent it - next() only ever drains
+    // what's *already* arrived (see its own doc comment on bufferedLen()),
+    // so calling it immediately here would race clientWriter's still-in-
+    // flight send and could see only the pre-999 backlog. A short wait lets
+    // that one send actually land before draining.
+    try io.sleep(std.Io.Duration.fromMilliseconds(100), .awake);
+    try testing.expectEqual(@as(u32, 999), try subscriber.next());
 }
 
 const TestReading = struct {
@@ -255,47 +395,27 @@ test "pubsub: dead subscriber is dropped from the client list" {
 
     const publisher = try node.publish(u32, "pubsub_test_dead_client");
 
-    // BUGFIX: this used to create a real Subscriber and close its own conn
-    // directly - inert back when nothing automatically read from a
-    // Subscriber unless a test explicitly called next(). Now every
-    // subscribe() spawns a background run() task that reads continuously
-    // and reconnects on its own if dropped, so a real Subscriber can't
-    // cleanly simulate "a client that's gone for good" anymore - closing
-    // its own fd would race run()'s in-flight read (a hard panic on this
-    // Io backend), and even routed through the publisher's side instead,
-    // the Subscriber would just reconnect and show back up in
-    // publisher.clients, racing this test's own assertion. Connecting a
-    // raw socket and completing the handshake by hand isolates this test
-    // back to just Publisher's own dead-client detection, with no
-    // self-healing Subscriber in the way.
     {
-        var path_buf: [256]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "{s}{s}/{s}", .{ protocol.globals.PUBLISHER_SOCKET_DIR, "common", "pubsub_test_dead_client" });
-        const addr = try net.UnixAddress.init(path);
-        const conn = try addr.connect(io);
-
-        var w_buf: [64]u8 = undefined;
-        var w = conn.writer(io, &w_buf);
-        try w.interface.writeAll(mad.code(u32));
-        try w.interface.flush();
-
-        var r_buf: [1]u8 = undefined;
-        var r = conn.reader(io, &r_buf);
-        _ = try r.interface.takeByte();
-
-        conn.close(io); // dies immediately after handshaking - never touched again
+        // this subscriber is only kept alive long enough to connect, then its
+        // connection is closed — simulating a subscriber process that died.
+        const doomed = try node.subscribe(u32, "pubsub_test_dead_client");
+        doomed.conn.close(io);
     }
-
-    // Give the publisher's accept loop a moment to actually register the
-    // now-dead connection above before checking clients_num.
-    try io.sleep(std.Io.Duration.fromMilliseconds(100), .awake);
-    try testing.expectEqual(@as(usize, 1), publisher.clients_num);
 
     const survivor = try node.subscribe(u32, "pubsub_test_dead_client");
 
-    // first publish() after the dead client closed is what actually notices
-    // the write failure and swap-removes it.
+    // Unlike the old synchronous design, a slot's death is now detected and
+    // reclaimed in two separate steps, not within one publish() call: the
+    // first publish() after the dead client closed wakes its clientWriter
+    // task, which attempts the write, fails, and marks the slot dead in the
+    // background - not necessarily before this call itself returns. A
+    // *second* publish() is what actually reclaims the slot, once it
+    // observes dead == true.
     try publisher.publish(1);
+    _ = try survivor.next();
+
+    try io.sleep(std.Io.Duration.fromMilliseconds(100), .awake); // let clientWriter notice and mark dead
+    try publisher.publish(2);
     _ = try survivor.next();
 
     try testing.expectEqual(@as(usize, 1), publisher.clients_num);

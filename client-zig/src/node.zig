@@ -127,18 +127,7 @@ pub const Node = struct {
         const sub = try self.allocator.create(Subscriber(K));
         errdefer self.allocator.destroy(sub);
 
-        // One-time init for the queue's synchronization primitives - like
-        // ServiceCaller's own `c.lock = .init` below, dial()/connect() must
-        // never touch these again after the first connect, since a
-        // reconnect can happen concurrently with a caller actively waiting
-        // on queue_cond (see subscriber.zig's dial() for why).
-        sub.queue_lock = .init;
-        sub.queue_cond = .init;
-        sub.head = 0;
-        sub.count = 0;
-
         try sub.connect(self.io, self.namespace, topic);
-        try sub.start();
         return sub;
     }
 

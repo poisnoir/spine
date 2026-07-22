@@ -7,10 +7,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/poisnoir/spine-go/client-go/internal/globals"
 	"github.com/poisnoir/spine-go/client-go/internal/mad"
 )
 
@@ -79,189 +79,188 @@ func TestSubscriber_ConnectReturnsErrorWhenHandshakeReadFails(t *testing.T) {
 	}
 }
 
-// Historical note on how Subscriber.Get() got to its current design, kept
-// because both bugs below are real and were verified live, and the second
-// one is easy to reintroduce by accident in any future rewrite of run():
+// Historical note on how Subscriber.Get() got to its current design:
 //
 //  1. Get() used to just wait on a signal from a background goroutine that
 //     continuously read the socket into a single shared lastData field - a
 //     fresh decoded value overwrote the previous one before a slow-to-call
 //     Get() ever saw it. 2000 rapid Publish() calls delivered only 348
 //     values via Get(), out of order.
-//  2. An intermediate fix made Get() do its own read directly (no
-//     buffering at all, matching client-zig) - which exposed a second,
-//     independent bug: reading into the *whole* MAX_PACKET_SIZE pool
-//     buffer via a single conn.Read() silently discarded extra bytes,
-//     since a Unix domain socket has no message framing of its own and one
-//     read call could return several already-written values concatenated
-//     together once the publisher got far enough ahead. This skipped
-//     straight from value 1 to value 31 in the same burst.
+//  2. A bounded ring-buffer queue (background goroutine feeds it, Get()
+//     pops from it) fixed that, deliberately trading data loss for never
+//     blocking the publisher on a slow subscriber - but its own producer
+//     goroutine could die on a permanent reconnect failure with nothing
+//     left to ever wake a blocked Get() again, hanging it forever. Fixing
+//     that hang was possible, but the head-of-line-blocking tradeoff itself
+//     wasn't judged worth it here, so this went back to option 3 below.
+//  3. The current design: Get() reads directly, synchronously, matching
+//     client-zig's Subscriber.next() - no queue, no background goroutine,
+//     no possibility of the producer dying independently of whoever's
+//     calling Get(). The tradeoff is the mirror image of option 2's: a
+//     slow Get() caller now applies real backpressure through to the
+//     publisher (see Publisher.Publish's own doc comment), instead of
+//     silently losing its own stale data.
 //
-// The current design (run() feeds a bounded, oldest-evicted-first queue;
-// Get() just pops from it) is a deliberate, discussed tradeoff, not a bug:
-// see the two tests below for what it actually guarantees.
+// Get() must still avoid the *other* independent bug bug 2's fix also
+// carried forward: reading into the *whole* MAX_PACKET_SIZE pool buffer via
+// a single conn.Read() silently discards extra bytes, since a Unix domain
+// socket has no message framing of its own and one read call could return
+// several already-written values concatenated together once the publisher
+// got far enough ahead. Get() uses io.ReadFull for exactly one payload's
+// worth to avoid that - see Get()'s own comment.
 
-// A burst that fits inside subscriberQueueCapacity must never lose
-// anything - only a burst that actually overflows the queue should drop
-// anything, and only its oldest entries (see the overflow test below).
-func TestSubscriber_BurstWithinCapacityDeliversEveryValueInOrder(t *testing.T) {
+// A publisher restarting (or its connection otherwise dropping) must be
+// transparent to Get() - it reconnects internally and keeps blocking,
+// rather than surfacing the drop as an error to the caller.
+func TestSubscriber_GetReconnectsAfterConnectionDrop(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	node, err := CreateNode("common", "subscriber_withincap_test_node", ctx, logger)
+	node, err := CreateNode("common", "subscriber_reconnect_test_node", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	pub, err := NewPublisher[uint32](node, "subscriber_withincap_test_topic")
+	pub, err := NewPublisher[uint32](node, "subscriber_reconnect_test_topic")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub, err := NewSubscriber[uint32](node, "subscriber_withincap_test_topic")
+	sub, err := NewSubscriber[uint32](node, "subscriber_reconnect_test_topic")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	const n = subscriberQueueCapacity // exactly at capacity - must not overflow
-	for i := uint32(0); i < n; i++ {
-		pub.Publish(i)
+	pub.Publish(1)
+	got, err := sub.Get()
+	if err != nil {
+		t.Fatalf("first Get() failed: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("first Get(): got %d, want 1", got)
 	}
 
-	// Give run() time to read, decode, and queue all n values before we
-	// start draining - the point of this test is the queue's own
-	// contents, not a race between producer and consumer.
-	time.Sleep(300 * time.Millisecond)
+	// Simulate the connection dying by closing the *publisher's* accepted
+	// copy of it (not the subscriber's own conn) - closing your own fd and
+	// then reusing it is a use-after-close bug, not a stand-in for a real
+	// remote disconnect. Closing the peer's end and leaving the
+	// subscriber's own fd untouched is exactly how a real disconnect gets
+	// observed: Get()'s next read on its own still-valid fd sees a genuine
+	// EOF/error.
+	pub.mu.Lock()
+	pub.clients[0].Close()
+	pub.clients = pub.clients[:0]
+	pub.mu.Unlock()
 
-	for want := uint32(0); want < n; want++ {
-		got, err := sub.Get()
-		if err != nil {
-			t.Fatalf("Get() failed at value %d: %v", want, err)
+	resultCh := make(chan struct {
+		v   uint32
+		err error
+	}, 1)
+	go func() {
+		v, err := sub.Get()
+		resultCh <- struct {
+			v   uint32
+			err error
+		}{v, err}
+	}()
+
+	// give Get() a moment to notice the closed conn and reconnect before
+	// publishing - dialing a local unix socket is fast but not instant.
+	time.Sleep(200 * time.Millisecond)
+	pub.Publish(2)
+
+	select {
+	case r := <-resultCh:
+		if r.err != nil {
+			t.Fatalf("Get() after reconnect failed: %v", r.err)
 		}
-		if got != want {
-			t.Fatalf("value %d: got %d, want %d (dropped or reordered within capacity)", want, got, want)
+		if r.v != 2 {
+			t.Fatalf("Get() after reconnect: got %d, want 2", r.v)
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Get() did not return after a connection drop + republish")
 	}
 }
 
-// A burst that exceeds subscriberQueueCapacity must evict the *oldest*
-// unread values to make room for newer ones, keeping exactly the newest
-// subscriberQueueCapacity, still in order - not drop newest, not reorder,
-// not silently keep stale data indefinitely.
-func TestSubscriber_OverflowDropsOldestKeepsNewestInOrder(t *testing.T) {
+// A *permanent* reconnect failure (the producer now serves a different
+// type) must surface as a real error from Get() - not be retried forever,
+// and not leave Get() hanging with nothing to ever wake it (the ring-buffer
+// design's bug - see the historical note above). Since Get() does its own
+// read directly with no separate producer goroutine to die independently,
+// there's no separate "who wakes the waiter" question here: the same call
+// that hits the permanent failure is the one that returns it.
+func TestSubscriber_GetReturnsErrorInsteadOfHangingAfterPermanentReconnectFailure(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	node, err := CreateNode("common", "subscriber_overflow_test_node", ctx, logger)
+	node, err := CreateNode("common", "subscriber_permanent_fail_test_node", ctx, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	pub, err := NewPublisher[uint32](node, "subscriber_overflow_test_topic")
+	topic := "subscriber_permanent_fail_test_topic"
+	path := "/tmp/spine/publisher/" + node.namespace + "/" + topic
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(path)
+
+	listener1, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub, err := NewSubscriber[uint32](node, "subscriber_overflow_test_topic")
-	if err != nil {
-		t.Fatal(err)
-	}
 
-	const n = 100 // > subscriberQueueCapacity (32): guarantees overflow
-	for i := uint32(0); i < n; i++ {
-		pub.Publish(i)
-	}
-
-	// Deliberately not draining via Get() until after every value has been
-	// published and (almost certainly) already read+queued by run() - the
-	// queue needs to have actually overflowed before this test means
-	// anything.
-	time.Sleep(300 * time.Millisecond)
-
-	firstExpected := uint32(n - subscriberQueueCapacity)
-	for want := firstExpected; want < n; want++ {
-		got, err := sub.Get()
+	acceptedCh := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener1.Accept()
 		if err != nil {
-			t.Fatalf("Get() failed at value %d: %v", want, err)
+			return
 		}
-		if got != want {
-			t.Fatalf("value %d: got %d, want %d (oldest-eviction order broken)", want, got, want)
-		}
-	}
-}
+		buf := make([]byte, 64)
+		conn.Read(buf) // consume the type code
+		conn.Write([]byte{globals.OK_STATUS_CODE})
+		acceptedCh <- conn
+	}()
 
-// Concurrent Get() callers are meant to be safe, each getting a distinct
-// value in FIFO order (see Get()'s own doc comment) - the queue is shared
-// mutable state now guarded by queueMu/queueCond instead of by a single
-// synchronous read per call, so this is worth its own direct check rather
-// than only trusting the reasoning behind that design. -race isn't
-// available in this environment (no cgo/gcc); run repeated with -count in
-// CI where it is, for whatever extra confidence that adds.
-func TestSubscriber_ConcurrentGetCallersEachGetDistinctSequentialValues(t *testing.T) {
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	node, err := CreateNode("common", "subscriber_concurrent_get_node", ctx, logger)
+	sub, err := NewSubscriber[uint32](node, topic)
 	if err != nil {
 		t.Fatal(err)
 	}
+	listener1.Close()
 
-	pub, err := NewPublisher[uint32](node, "subscriber_concurrent_get_topic")
+	firstConn := <-acceptedCh
+	firstConn.Close() // forces Get()'s next read to fail and reconnect
+
+	os.Remove(path)
+	listener2, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub, err := NewSubscriber[uint32](node, "subscriber_concurrent_get_topic")
-	if err != nil {
-		t.Fatal(err)
-	}
+	defer listener2.Close()
+	defer os.Remove(path)
 
-	const n = subscriberQueueCapacity // stay within capacity - this test is about concurrent consumers, not overflow
-	const consumers = 8
-	if n%consumers != 0 {
-		t.Fatalf("test setup: n (%d) must divide evenly by consumers (%d)", n, consumers)
-	}
-
-	var wg sync.WaitGroup
-	var resultsMu sync.Mutex
-	var results []uint32
-
-	for c := 0; c < consumers; c++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < n/consumers; i++ {
-				v, err := sub.Get()
-				if err != nil {
-					t.Errorf("Get() failed: %v", err)
-					return
-				}
-				resultsMu.Lock()
-				results = append(results, v)
-				resultsMu.Unlock()
-			}
-		}()
-	}
-
-	for i := uint32(0); i < n; i++ {
-		pub.Publish(i)
-	}
-
-	wg.Wait()
-
-	if len(results) != n {
-		t.Fatalf("got %d results, want %d", len(results), n)
-	}
-	seen := make(map[uint32]bool, n)
-	for _, v := range results {
-		if seen[v] {
-			t.Fatalf("value %d was returned to more than one Get() caller", v)
+	go func() {
+		conn, err := listener2.Accept()
+		if err != nil {
+			return
 		}
-		seen[v] = true
-	}
-	for want := uint32(0); want < n; want++ {
-		if !seen[want] {
-			t.Fatalf("value %d was never returned to any caller", want)
+		conn.Write([]byte{255}) // anything != OK_STATUS_CODE
+		conn.Close()
+	}()
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := sub.Get()
+		resultCh <- err
+	}()
+
+	select {
+	case err := <-resultCh:
+		if err == nil {
+			t.Fatal("expected an error, got nil")
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Get() hung instead of returning an error")
 	}
 }
